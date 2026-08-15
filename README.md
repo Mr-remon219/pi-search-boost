@@ -186,7 +186,8 @@ Every iteration was verified with real queries and audit-log evidence (not paper
 
 ## Development history
 
-22 measured iterations (in Chinese, see the repo commit history): from single-engine Bing scraping → 4-engine fusion with complexity routing → focus-filtered reading (95% token savings) → deep research with corroboration → parallel subagents → proactive-search policy (v3: anti-over-search stop rules; v4: autonomy/fallback rules) → final audit fixing parameter exposure bugs and tail-reading bugs.
+23 measured iterations (in Chinese, see the repo commit history): from single-engine Bing scraping → 4-engine fusion with complexity routing → focus-filtered reading (95% token savings) → deep research with corroboration → parallel subagents → proactive-search policy (v3: anti-over-search stop rules; v4: autonomy/fallback rules) → final audit fixing parameter exposure bugs and tail-reading bugs → **round 23: TUN fake-ip carve-out (Clash TUN answers every DNS query with 198.18/15; the SSRF guard now allows an all-fake-ip hostname resolution while literal private IPs / loopback / metadata stay blocked; opt out with `PI_SEARCH_ALLOW_TUN_FAKEIP=0`) + single-policy merge (deduplicated the proactive-search ruleset into one `<search_balance>` with an explicit tool-routing section; the standalone web-search-guidance extension was retired).**
+> Note for Clash/sing-box TUN users: without this fix, `fetch_page` / `web_fetch` fail on every real URL with "resolves to private IP 198.18.0.x".
 
 ## License
 
