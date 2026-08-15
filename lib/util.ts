@@ -302,6 +302,25 @@ export function isPrivateOrLocalIp(ip: string): boolean {
 	return false;
 }
 
+/**
+ * Clash/mihomo/sing-box TUN mode answers EVERY DNS query with a synthetic IP
+ * from 198.18.0.0/15 (RFC 2544 benchmarking range — used only by TUN proxies).
+ * Blocking that range makes every real page lookup fail on TUN machines with
+ * "resolves to private IP 198.18.0.x" while the connection would actually be
+ * routed by the TUN device to the real host.
+ *
+ * The guard must treat an all-fake-ip DNS answer as "public via TUN" — while
+ * literal private IPs, loopback, metadata, RFC1918 etc. stay blocked.
+ */
+export function isTunFakeIp(ip: string): boolean {
+	if (isIP(ip) !== 4) return false;
+	const [a, b] = ip.split(".").map(Number);
+	return a === 198 && (b === 18 || b === 19);
+}
+
+/** Opt out of the TUN carve-out (defense in depth) with PI_SEARCH_ALLOW_TUN_FAKEIP=0. */
+const ALLOW_TUN_FAKE_IP = process.env.PI_SEARCH_ALLOW_TUN_FAKEIP !== "0";
+
 const BLOCKED_HOST_SUFFIXES = [".localhost", ".local", ".internal", ".lan", ".home"];
 
 /**
@@ -339,9 +358,19 @@ export async function assertPublicHttpUrl(raw: string): Promise<void> {
 	}
 	try {
 		const results = await lookup(host, { all: true });
-		for (const r of results) {
-			if (isPrivateOrLocalIp(r.address)) {
-				throw new Error(`blocked url: resolves to private IP ${r.address}`);
+		// TUN fake-ip environment: every A answer lands in 198.18/15 and nothing
+		// else is private — the connection goes through the TUN device, so allow.
+		// Anything mixed (loopback / RFC1918 / metadata) still blocks below.
+		const viaTun =
+			ALLOW_TUN_FAKE_IP &&
+			results.length > 0 &&
+			results.some((r) => isTunFakeIp(r.address)) &&
+			results.every((r) => isPrivateOrLocalIp(r.address) === isTunFakeIp(r.address));
+		if (!viaTun) {
+			for (const r of results) {
+				if (isPrivateOrLocalIp(r.address)) {
+					throw new Error(`blocked url: resolves to private IP ${r.address}`);
+				}
 			}
 		}
 	} catch (err) {

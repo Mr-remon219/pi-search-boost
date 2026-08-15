@@ -57,6 +57,12 @@ Depth by stakes:
 - Questions shaping the user's work (thesis decisions, architecture): verify properly — fused_search with variants, or deep_research, then cite URLs
 - Never answer a technical question with a possibly-outdated fact when a 2-second search settles it
 
+Tool routing (single source of truth — prefer these over the generic web_search/web_fetch):
+- Single-point lookup: one fused_search (simple tier) or web_search — no ceremony
+- Need a page's content: fetch_page, with focus when you only need part of it
+- Multi-angle / comparison / research: fused_search with variants; deep_research for a single deep dive; research_parallel for separable angles
+- Local files/code can answer it: no search at all
+
 Stop when (anti-over-search):
 - The results already give enough evidence to answer — stop and write the answer; do not keep searching to pad citations
 - A second search with the same query or intent — that is a loop; stop, re-read what you have, and answer from it

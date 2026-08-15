@@ -25,6 +25,7 @@ import {
 	countWords,
 	domainMatches,
 	isPrivateOrLocalIp,
+	isTunFakeIp,
 	normalizeUrl,
 	segmentCjk,
 	tokenize,
@@ -227,6 +228,15 @@ describe("SSRF guard", () => {
 		assert.ok(!isPrivateOrLocalIp("8.8.8.8"));
 	});
 
+	it("classifies TUN fake-ip addresses", () => {
+		// Clash/mihomo/sing-box TUN answers every A query with 198.18.0.0/15
+		assert.ok(isTunFakeIp("198.18.0.191"));
+		assert.ok(isTunFakeIp("198.19.255.1"));
+		assert.ok(!isTunFakeIp("10.0.0.1"));
+		assert.ok(!isTunFakeIp("1.1.1.1"));
+		assert.ok(!isTunFakeIp("::1"));
+	});
+
 	it("rejects localhost, private IPs, and non-http schemes", async () => {
 		await assert.rejects(() => assertPublicHttpUrl("http://127.0.0.1/"), /blocked url/);
 		await assert.rejects(() => assertPublicHttpUrl("http://localhost/admin"), /blocked url/);
@@ -234,6 +244,9 @@ describe("SSRF guard", () => {
 		await assert.rejects(() => assertPublicHttpUrl("http://169.254.169.254/latest/meta-data"), /blocked url/);
 		await assert.rejects(() => assertPublicHttpUrl("file:///etc/passwd"), /blocked url/);
 		await assert.rejects(() => assertPublicHttpUrl("http://[::1]/"), /blocked url/);
+		// literal benchmark-range IPs stay blocked even though hostname
+		// resolution into that range is the TUN fake-ip carve-out
+		await assert.rejects(() => assertPublicHttpUrl("http://198.18.0.1/"), /blocked url/);
 	});
 });
 
