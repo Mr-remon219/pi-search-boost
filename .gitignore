@@ -1,0 +1,13 @@
+# local state
+search-boost-cache.json
+search-boost-audit.jsonl
+search-boost-audit.jsonl.old
+
+# secrets — never commit keys
+.env
+*.local
+
+# editor / OS
+.DS_Store
+Thumbs.db
+node_modules/
