@@ -85,7 +85,24 @@ During coding / development work, search BEFORE you write — never write code a
 		if (event.systemPrompt.includes("<search_balance>")) {
 			return {}; // already injected by an earlier handler
 		}
-		return { systemPrompt: `${event.systemPrompt}\n${PROACTIVE_SEARCH_RULES}` };
+		// budget state (not just a slogan): count today's searches so the model
+		// can calibrate effort — research tasks may spend more, simple lookups
+		// should not push the day's total into the hundreds
+		let todayCount = 0;
+		try {
+			const today = new Date().toISOString().slice(0, 10);
+			const recent = audit.readTail(400); // tail window is enough for a day's usage
+			for (const e of recent) {
+				if (e.type === "search" && e.ts.startsWith(today)) todayCount++;
+			}
+		} catch {
+			/* audit must never break agent start */
+		}
+		const budgetNote =
+			todayCount > 0
+				? `\n[search budget] Searches used today: ${todayCount}. Research tasks may spend more; for simple lookups, prefer answering from what you already have when the day's total is high.`
+				: "";
+		return { systemPrompt: `${event.systemPrompt}\n${PROACTIVE_SEARCH_RULES}${budgetNote}` };
 	});
 
 	const onProgress = (toolCallId: string, onUpdate?: (u: { content: Array<{ type: "text"; text: string }> }) => void) =>
@@ -579,6 +596,19 @@ During coding / development work, search BEFORE you write — never write code a
 				const depth = e.tier === "complex" ? 2 : 1;
 				creditEstimate += depth * Math.max(1, e.queriesUsed.length);
 			}
+			// duplicate-query detection (runtime anti-loop): the same query text
+			// fired repeatedly suggests a search loop the model did not break
+			const dupByQuery = new Map<string, number>();
+			for (const e of searches) {
+				if (e.type !== "search") continue;
+				const q = e.query.toLowerCase().trim();
+				dupByQuery.set(q, (dupByQuery.get(q) ?? 0) + 1);
+			}
+			const dupLines = [...dupByQuery.entries()]
+				.filter(([, n]) => n > 1)
+				.sort((a, b) => b[1] - a[1])
+				.slice(0, 5)
+				.map(([q, n]) => `${n}x "${q.slice(0, 50)}"`);
 			const words = okFetches
 				.map((e) => (e.type === "fetch" ? e.wordCount ?? 0 : 0))
 				.filter((w) => w > 0);
@@ -602,6 +632,7 @@ During coding / development work, search BEFORE you write — never write code a
 						),
 					)}`,
 					`tiers: ${[...tierCounts.entries()].map(([t, n]) => `${t}=${n}`).join(", ") || "(no tier data)"} | tavily credits est: ~${creditEstimate} (free 1000/mo)`,
+					dupLines.length > 0 ? `repeated queries (loop?): ${dupLines.join(" | ")}` : "no repeated queries",
 					topErrDomains.length
 						? `top failing domains: ${topErrDomains.map(([d, n]) => `${d}(${n})`).join(", ")}`
 						: "no failing domains",
