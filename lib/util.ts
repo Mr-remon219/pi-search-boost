@@ -3,6 +3,8 @@
  * URL normalization, text tokenization, and a tiny concurrency pool.
  * Zero dependencies — node built-ins only.
  */
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
 
 export const STOPWORDS = new Set([
 	"the", "a", "an", "and", "or", "but", "of", "to", "in", "on", "for", "with",
@@ -91,21 +93,79 @@ export function collapseSpace(input: string): string {
 	return input.replace(/\s+/g, " ").trim();
 }
 
-/** Latin tokens (len >= 2, non-stopword). CJK runs are kept as whole tokens. */
+/** Characters that whitespace tokenization cannot split: CJK + kana + hangul. */
+const CJK_CHAR = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]/;
+const CJK_CHAR_G = new RegExp(CJK_CHAR.source, "g");
+const CJK_RUN_G = new RegExp(`${CJK_CHAR.source}{2,}`, "g");
+
+/** Chinese particles that dominate segmenter output and wreck coverage scoring. */
+const CJK_STOPWORDS = new Set([
+	"的", "了", "和", "是", "在", "有", "与", "及", "或", "对", "把", "被", "从", "到",
+	"为", "以", "而", "并", "也", "还", "就", "都", "很", "更", "最", "个", "中", "上",
+	"下", "这", "那", "什么", "怎么", "如何", "为什么", "哪些", "可以", "使用", "一个",
+	"我们", "他们", "它", "吗", "呢", "吧", "着", "过", "地", "得", "所以", "因为",
+]);
+
+/** ICU word segmentation for CJK; falls back to whole runs where unavailable. */
+const cjkSegmenter: Intl.Segmenter | null = (() => {
+	try {
+		return new Intl.Segmenter("zh-Hans", { granularity: "word" });
+	} catch {
+		return null;
+	}
+})();
+
+/**
+ * Segment a CJK run into words. Chinese has no spaces, so a run like
+ * 多头注意力机制 must be split before it can be matched against page text —
+ * matching the whole run only succeeds on a verbatim repetition of the query.
+ */
+export function segmentCjk(run: string): string[] {
+	if (!cjkSegmenter) return [run];
+	const raw = [...cjkSegmenter.segment(run)].filter((s) => s.isWordLike).map((s) => s.segment);
+	const out: string[] = [];
+	let carry = "";
+	for (const s of raw) {
+		if (s.length === 1 && !CJK_STOPWORDS.has(s)) {
+			carry += s;
+			continue;
+		}
+		if (carry) {
+			out.push(carry + s);
+			carry = "";
+			continue;
+		}
+		out.push(s);
+	}
+	if (carry) out.push(carry);
+	return out.filter((t) => t.length >= 2 && !CJK_STOPWORDS.has(t));
+}
+
+/** Latin tokens (len >= 2, non-stopword) plus dictionary-segmented CJK words. */
 export function tokenize(text: string): string[] {
 	const out: string[] = [];
-	// CJK contiguous runs first
-	const cjkRuns = text.match(/[\u4e00-\u9fff\u3400-\u4dbf]{2,}/g) ?? [];
-	for (const run of cjkRuns) out.push(run);
-	// Latin/num tokens
+	for (const run of text.match(CJK_RUN_G) ?? []) out.push(...segmentCjk(run));
 	const words = text
 		.toLowerCase()
-		.replace(/[\u4e00-\u9fff\u3400-\u4dbf]/g, " ")
+		.replace(CJK_CHAR_G, " ")
 		.match(/[a-z0-9][a-z0-9'._-]*/g) ?? [];
 	for (const w of words) {
 		if (w.length >= 2 && !STOPWORDS.has(w)) out.push(w);
 	}
 	return out;
+}
+
+/**
+ * Length of a text in comparable "words". CJK text has no spaces, so
+ * `split(/\s+/).length` reports a Chinese page as a handful of words and every
+ * word-count threshold (thin-page detection, "content usable directly") then
+ * misfires. Chinese averages ~1.6 characters per word.
+ */
+export function countWords(text: string): number {
+	if (!text || !text.trim()) return 0;
+	const cjk = (text.match(CJK_CHAR_G) ?? []).length;
+	const latin = text.replace(CJK_CHAR_G, " ").trim().split(/\s+/).filter(Boolean).length;
+	return latin + Math.ceil(cjk / 1.6);
 }
 
 /** Frequency-ranked distinctive terms of a text. */
@@ -208,4 +268,84 @@ export async function pool<T, R>(
 
 export function nowIso(): string {
 	return new Date().toISOString();
+}
+
+/** True for loopback, RFC1918, link-local, CGNAT, and unique-local addresses. */
+export function isPrivateOrLocalIp(ip: string): boolean {
+	const kind = isIP(ip);
+	if (kind === 4) {
+		const [a, b] = ip.split(".").map(Number);
+		if (a === 0 || a === 10 || a === 127) return true;
+		if (a === 169 && b === 254) return true;
+		if (a === 172 && b >= 16 && b <= 31) return true;
+		if (a === 192 && b === 168) return true;
+		if (a === 100 && b >= 64 && b <= 127) return true;
+		if (a === 198 && (b === 18 || b === 19)) return true;
+		return false;
+	}
+	if (kind === 6) {
+		const lower = ip.toLowerCase();
+		if (lower === "::1" || lower === "::") return true;
+		const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(lower);
+		if (mapped) return isPrivateOrLocalIp(mapped[1]);
+		const mappedHex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(lower);
+		if (mappedHex) {
+			const hi = parseInt(mappedHex[1], 16);
+			const lo = parseInt(mappedHex[2], 16);
+			return isPrivateOrLocalIp(`${(hi >> 8) & 255}.${hi & 255}.${(lo >> 8) & 255}.${lo & 255}`);
+		}
+		const first = parseInt(lower.split(":")[0] || "0", 16);
+		if ((first & 0xfe00) === 0xfc00) return true; // unique local
+		if ((first & 0xffc0) === 0xfe80) return true; // link-local
+		return false;
+	}
+	return false;
+}
+
+const BLOCKED_HOST_SUFFIXES = [".localhost", ".local", ".internal", ".lan", ".home"];
+
+/**
+ * Reject URLs that would let fetch_page hit loopback, private networks, or
+ * cloud metadata. DNS is resolved so names that rebind to 127.0.0.1 are caught.
+ */
+export async function assertPublicHttpUrl(raw: string): Promise<void> {
+	let u: URL;
+	try {
+		u = new URL(raw);
+	} catch {
+		throw new Error("blocked url: invalid URL");
+	}
+	if (u.protocol !== "http:" && u.protocol !== "https:") {
+		throw new Error("blocked url: only http(s) allowed");
+	}
+	if (u.username || u.password) {
+		throw new Error("blocked url: userinfo not allowed");
+	}
+	const host = u.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+	if (!host) throw new Error("blocked url: empty host");
+	if (
+		host === "localhost" ||
+		host === "metadata.google.internal" ||
+		BLOCKED_HOST_SUFFIXES.some((s) => host === s.slice(1) || host.endsWith(s))
+	) {
+		throw new Error("blocked url: private/local host");
+	}
+	if (/^\d+$/.test(host)) {
+		throw new Error("blocked url: numeric host");
+	}
+	if (isIP(host)) {
+		if (isPrivateOrLocalIp(host)) throw new Error("blocked url: private IP");
+		return;
+	}
+	try {
+		const results = await lookup(host, { all: true });
+		for (const r of results) {
+			if (isPrivateOrLocalIp(r.address)) {
+				throw new Error(`blocked url: resolves to private IP ${r.address}`);
+			}
+		}
+	} catch (err) {
+		if (err instanceof Error && err.message.startsWith("blocked url:")) throw err;
+		throw new Error("blocked url: cannot resolve host");
+	}
 }
