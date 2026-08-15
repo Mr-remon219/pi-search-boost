@@ -9,7 +9,7 @@
  */
 import { JsonCache } from "./cache.ts";
 import {
-	collapseSpace, decodeHtml, fetchText, hostOf, nowIso, queryTerms, stripTags,
+	assertPublicHttpUrl, collapseSpace, countWords, decodeHtml, fetchText, hostOf, nowIso, queryTerms, stripTags,
 } from "./util.ts";
 
 export interface PageResult {
@@ -125,6 +125,7 @@ export interface FetchPageOptions {
 }
 
 export async function fetchPage(url: string, opts: FetchPageOptions = {}): Promise<PageResult> {
+	await assertPublicHttpUrl(url);
 	const cache = opts.cache;
 	const maxChars = opts.maxChars ?? DEFAULT_MAX_CHARS;
 	const cacheTtl = Number(process.env.PI_SEARCH_PAGE_TTL ?? 86400); // 24h
@@ -155,7 +156,7 @@ export async function fetchPage(url: string, opts: FetchPageOptions = {}): Promi
 		return {
 			...cached,
 			content: truncate(content),
-			wordCount: truncate(content).split(/\s+/).length,
+			wordCount: countWords(truncate(content)),
 			focused,
 			filteredChars,
 			via: "cache",
@@ -170,7 +171,7 @@ export async function fetchPage(url: string, opts: FetchPageOptions = {}): Promi
 		links?: string[];
 		error?: string;
 	}
-	const words = (t: string) => t.trim().split(/\s+/).length;
+	const words = countWords;
 
 	// Race the two fetch channels (jina ~1s, local ~1-2s) instead of running them
 	// serially — eliminates the 20s+10s worst-case stacking measured in the field.
@@ -298,7 +299,7 @@ export async function fetchPage(url: string, opts: FetchPageOptions = {}): Promi
 		fetchedAt: nowIso(),
 		via,
 		content,
-		wordCount: content.split(/\s+/).length,
+		wordCount: countWords(content),
 		links,
 		jinaError,
 		localError,
@@ -335,7 +336,7 @@ export async function fetchPage(url: string, opts: FetchPageOptions = {}): Promi
 		fetchedAt: nowIso(),
 		via,
 		content: truncated,
-		wordCount: truncated.split(/\s+/).length,
+		wordCount: countWords(truncated),
 		links,
 		jinaError,
 		localError,
@@ -345,48 +346,60 @@ export async function fetchPage(url: string, opts: FetchPageOptions = {}): Promi
 	return result;
 }
 
-/** Paragraphs most relevant to the focus terms (dynamic filtering, find_in_page). */
+/** Reader-mode markdown keeps navigation as dense link lists; those lines
+ * match query terms as readily as prose and are worthless as evidence. */
+function isBoilerplate(text: string): boolean {
+	const linkChars = (text.match(/\]\(|https?:\/\/|!\[/g) ?? []).length;
+	if (linkChars >= 3) return true;
+	const urlChars = (text.match(/https?:\/\/\S+/g) ?? []).join("").length;
+	return urlChars > text.length * 0.35;
+}
+
+function termMatchers(text: string): Array<{ re: RegExp; weight: number }> {
+	return queryTerms(text)
+		.filter((t) => t.length >= 2)
+		.map((t) => ({
+			re: new RegExp(t.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"),
+			weight: Math.min(t.length, 12),
+		}));
+}
+
+function scoreAgainstTerms(text: string, matchers: ReturnType<typeof termMatchers>): number {
+	const lower = text.toLowerCase();
+	let score = 0;
+	for (const { re, weight } of matchers) {
+		re.lastIndex = 0;
+		score += (lower.match(re)?.length ?? 0) * weight;
+	}
+	return score;
+}
+
+/**
+ * Paragraphs most relevant to the focus terms (dynamic filtering, find_in_page).
+ * Length floors are counted in words, not characters: a 40-character Chinese
+ * paragraph was previously discarded before it could be scored.
+ */
 export function pickParagraphs(content: string, focus: string, max = 8, maxLen = 400): string[] {
-	const terms = queryTerms(focus).filter((t) => t.length >= 2);
-	const paras = content
+	const matchers = termMatchers(focus);
+	return content
 		.split(/\n{2,}/)
 		.map((p) => collapseSpace(p))
-		.filter((p) => p.length >= 40);
-	const scored = paras
-		.map((p) => {
-			const lower = p.toLowerCase();
-			let score = 0;
-			for (const t of terms) {
-				const re = new RegExp(t.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g");
-				score += (lower.match(re)?.length ?? 0) * Math.min(t.length, 12);
-			}
-			return { p, score };
-		})
+		.filter((p) => countWords(p) >= 8 && !isBoilerplate(p))
+		.map((p) => ({ p, score: scoreAgainstTerms(p, matchers) }))
 		.filter((x) => x.score > 0)
 		.sort((a, b) => b.score - a.score)
 		.slice(0, max)
 		.map((x) => x.p.slice(0, maxLen));
-	return scored;
 }
 
 /** Pick the sentences of a page most relevant to the query (for excerpts/corroboration). */
 export function pickExcerpts(content: string, query: string, max = 3, maxLen = 500): string[] {
-	const terms = queryTerms(query).filter((t) => t.length >= 2);
-	const sentences = content
+	const matchers = termMatchers(query);
+	const scored = content
 		.split(/(?<=[.!?。！？])\s+|\n{2,}/)
 		.map((s) => collapseSpace(s))
-		.filter((s) => s.length >= 60);
-	const scored = sentences
-		.map((s) => {
-			const lower = s.toLowerCase();
-			let score = 0;
-			for (const t of terms) {
-				const re = new RegExp(t.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g");
-				const n = lower.match(re)?.length ?? 0;
-				score += n * Math.min(t.length, 12);
-			}
-			return { s, score };
-		})
+		.filter((s) => countWords(s) >= 12 && !isBoilerplate(s))
+		.map((s) => ({ s, score: scoreAgainstTerms(s, matchers) }))
 		.filter((x) => x.score > 0)
 		.sort((a, b) => b.score - a.score)
 		.slice(0, max);
@@ -394,4 +407,13 @@ export function pickExcerpts(content: string, query: string, max = 3, maxLen = 5
 		return [collapseSpace(content).slice(0, maxLen)];
 	}
 	return scored.map((x) => x.s.slice(0, maxLen));
+}
+
+/** Truncate engine-provided page text for the fused_search tool payload. */
+export function excerptForTool(content: string, maxChars = 2000): string {
+	const t = content.trim();
+	if (t.length <= maxChars) return t;
+	const cut = t.slice(0, maxChars);
+	const boundary = Math.max(cut.lastIndexOf("\n\n"), cut.lastIndexOf("\n"));
+	return (boundary > maxChars * 0.6 ? cut.slice(0, boundary) : cut) + "\n[content truncated]";
 }

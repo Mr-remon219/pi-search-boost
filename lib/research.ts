@@ -16,7 +16,7 @@ import { JsonCache } from "./cache.ts";
 import { fusedSearch, suggestFollowups } from "./engines.ts";
 import { fetchPage, pickExcerpts, type PageResult } from "./extract.ts";
 import {
-	distinctiveTerms, hostOf, nowIso, pool, queryTerms,
+	countWords, distinctiveTerms, hostOf, nowIso, pool, queryTerms,
 } from "./util.ts";
 
 export interface ResearchSource {
@@ -65,6 +65,8 @@ export interface ResearchOptions {
 	includeDomains?: string[];
 	excludeDomains?: string[];
 	recency?: "day" | "week" | "month" | "year" | "any";
+	/** first-round keyword variants (step-mode continuation); later rounds use follow-ups */
+	queries?: string[];
 	cache?: JsonCache;
 	signal?: AbortSignal;
 	progress?: (msg: string) => void;
@@ -74,12 +76,18 @@ function assertNotAborted(signal?: AbortSignal) {
 	if (signal?.aborted) throw new Error("aborted");
 }
 
+/** step mode is always one round; auto honors maxRounds (clamped 1–5). */
+export function plannedResearchRounds(mode: "auto" | "step", requested?: number): number {
+	if (mode === "step") return 1;
+	return Math.min(5, Math.max(1, requested ?? 3));
+}
+
 export async function runResearch(opts: ResearchOptions): Promise<ResearchResult> {
 	const started = Date.now();
 	const query = opts.query;
 	const goal = opts.goal;
 	const mode = opts.mode ?? "auto";
-	const maxRounds = Math.min(5, Math.max(1, opts.maxRounds ?? 3));
+	const maxRounds = plannedResearchRounds(mode, opts.maxRounds);
 	const maxSources = Math.min(15, Math.max(1, opts.maxSources ?? 8));
 	const perRound = Math.min(6, Math.max(2, opts.perRound ?? 3));
 	const engines = opts.engines;
@@ -94,7 +102,8 @@ export async function runResearch(opts: ResearchOptions): Promise<ResearchResult
 	let cacheHits = 0;
 	let engineStats: Record<string, unknown> = {};
 	let suggestedQueries: string[] = [];
-	let nextQueries: string[] | undefined; // fed back into the next round's search
+	let nextQueries: string[] | undefined =
+		opts.queries && opts.queries.length > 0 ? opts.queries : undefined;
 	let stopReason = "max_rounds";
 	let rounds = 0;
 	let newDomainsThisRound = 0;
@@ -152,15 +161,16 @@ export async function runResearch(opts: ResearchOptions): Promise<ResearchResult
 			// GPT-Researcher pattern: if the search result already carries full
 			// extracted content (tavily advanced / exa text), consume it directly
 			// instead of fetching the page — skips the slowest stage entirely.
-			const words = (t: string) => t.trim().split(/\s+/).length;
-			if (hit.content && words(hit.content) >= 300) {
+			if (hit.content && countWords(hit.content) >= 300) {
 				return {
 					title: hit.title,
 					url: hit.url,
+					domain: hostOf(hit.url),
 					via: "search" as const,
 					content: hit.content,
+					wordCount: countWords(hit.content),
 					fetchedAt: nowIso(),
-					links: [],
+					links: [] as string[],
 				};
 			}
 			try {
@@ -219,12 +229,20 @@ export async function runResearch(opts: ResearchOptions): Promise<ResearchResult
 			s.corroboratedBy = [...corr];
 		});
 
-		// coverage check
 		const uncovered = [...terms].filter((t) => !coveredTerms.has(t));
-		const primaryDomains = [...seenDomains].filter(
-			(d) => d.endsWith(".gov") || d.endsWith(".edu") || d === "wikipedia.org",
-		);
+		suggestedQueries = suggestFollowups(query, roundTitles, roundDomains, 4);
+		if (suggestedQueries.length > 0) {
+			nextQueries = suggestedQueries;
+			if (round < maxRounds && mode !== "step") {
+				progress(`round ${round}: gaps -> follow-ups: ${suggestedQueries.join(" | ")}`);
+			}
+		}
 
+		// step mode is one round only; still return gaps + suggested queries
+		if (mode === "step") {
+			stopReason = "step";
+			break;
+		}
 		if (sources.length >= maxSources) {
 			stopReason = "source_cap";
 			break;
@@ -237,16 +255,7 @@ export async function runResearch(opts: ResearchOptions): Promise<ResearchResult
 			stopReason = "terms_covered";
 			break;
 		}
-
-		// follow-up queries from new material (OpenDeepResearcher-style gap filling)
-		suggestedQueries = suggestFollowups(query, roundTitles, roundDomains, 4);
-		if (suggestedQueries.length > 0) {
-			nextQueries = suggestedQueries;
-			if (round < maxRounds) {
-				progress(`round ${round}: gaps -> follow-ups: ${suggestedQueries.join(" | ")}`);
-			}
-		} else {
-			// nothing new to search for — further rounds would repeat the same pool
+		if (suggestedQueries.length === 0) {
 			stopReason = "no_followups";
 			break;
 		}
