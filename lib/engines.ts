@@ -68,7 +68,7 @@ export const ENGINE_KEYS: Record<string, string> = {
 };
 
 export function availableEngines(): string[] {
-	const list = ["bing"];
+	const list = ["bing", "bravehtml"]; // free channels: keyless Bing HTML + Brave HTML
 	if (env(ENGINE_KEYS.tavily)) list.push("tavily");
 	if (env(ENGINE_KEYS.exa)) list.push("exa");
 	if (env(ENGINE_KEYS.brave)) list.push("brave");
@@ -183,7 +183,9 @@ export function parseDate(raw: string | null | undefined): string | null {
 }
 
 async function searchBingHtml(query: string, count: number): Promise<RawHit[]> {
-	const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}&count=${Math.min(count, 20)}`;
+	// explicit en-US market: without it Bing serves the local region (measured:
+	// "tokio" -> Japanese boy band on this host); mkt/setlang pin the language
+	const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}&count=${Math.min(count, 20)}&mkt=en-US&setlang=en&cc=US`;
 	const res = await fetchText(url, { timeoutMs: 15000 });
 	if (!res.ok || res.text.length < 200) {
 		throw new Error(`bing http ${res.status}`);
@@ -334,10 +336,57 @@ async function searchBrave(query: string, count: number, o: EngineQueryOptions =
 		}));
 }
 
+/* ---------------------------------- Brave HTML (free, keyless) ---------------------------------- */
+
+/** Free web-search channel: Brave's public HTML results page (no API key).
+ * Used as the second free engine alongside Bing so keyless mode always has
+ * two independent channels for cross-checking. Structure-change detection
+ * mirrors the Bing adapter: fail loudly, never silently return empty.
+ * Note: Brave rate-limits aggressively per IP (measured persistent 429 on
+ * datacenter-ish hosts); on 429 we back off for a while instead of hammering. */
+let braveHtmlCooldownUntil = 0;
+async function searchBraveHtml(query: string, count: number): Promise<RawHit[]> {
+	if (Date.now() < braveHtmlCooldownUntil) {
+		throw new Error("bravehtml: rate-limited, cooling down");
+	}
+	const url = `https://search.brave.com/search?q=${encodeURIComponent(query)}&source=web`;
+	// curl UA: Brave rate-limits browser-like UAs harder (measured 429 on Chrome
+	// UA, 200 on curl UA); the same trick that keeps Jina working
+	const res = await fetchText(url, { timeoutMs: 15000, headers: { "User-Agent": "curl/8.5.0" } });
+	if (!res.ok || res.text.length < 500) {
+		if (res.status === 429) braveHtmlCooldownUntil = Date.now() + 60_000;
+		throw new Error(`bravehtml http ${res.status}`);
+	}
+	const html = res.text;
+	if (!/data-pos="\d+"[^>]*data-type="web"/.test(html)) {
+		throw new Error("bravehtml: no result blocks parsed (structure changed / challenge page)");
+	}
+	const hits: RawHit[] = [];
+	// one block per web result card, cut at the next card
+	const blockRe = /data-pos="\d+"[^>]*data-type="web"[\s\S]*?(?=data-pos="\d+"|$)/g;
+	for (const m of html.matchAll(blockRe)) {
+		if (hits.length >= count) break;
+		const block = m[0];
+		const anchor = /<a href="(https?:\/\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/i.exec(block);
+		if (!anchor) continue;
+		const url2 = anchor[1].replace(/&amp;/g, "&");
+		if (/^(imgs|cdn|search)\.search\.brave\.com|brave\.com\//.test(url2)) continue;
+		const title = collapseSpace(decodeHtml(stripTags(anchor[2])));
+		if (!title || title.length < 3) continue;
+		// description = block text after the title link (skips site-name/chrome)
+		let snippet = collapseSpace(decodeHtml(stripTags(block.slice(anchor[0].length))));
+		if (snippet.length > 260) snippet = snippet.slice(0, 260);
+		hits.push({ title, url: url2, snippet });
+	}
+	if (hits.length === 0) throw new Error("bravehtml: parsed 0 results (structure changed)");
+	return hits;
+}
+
 /* --------------------------------- Engine map --------------------------------- */
 
 const ENGINE_FNS: Record<string, (q: string, n: number, o?: EngineQueryOptions) => Promise<RawHit[]>> = {
 	bing: searchBingHtml,
+	bravehtml: searchBraveHtml,
 	tavily: searchTavily,
 	exa: searchExa,
 	brave: searchBrave,
@@ -379,7 +428,7 @@ export function expandQueries(query: string, site?: string): string[] {
 
 /* --------------------------------- Scoring ----------------------------------- */
 
-const ENGINE_WEIGHT: Record<string, number> = { bing: 1.0, tavily: 1.2, exa: 1.2, brave: 1.1 };
+const ENGINE_WEIGHT: Record<string, number> = { bing: 1.0, bravehtml: 1.0, tavily: 1.2, exa: 1.2, brave: 1.1 };
 
 function domainBonus(domain: string): number {
 	if (AUTHORITATIVE_TLDS.some((t) => domain.endsWith(t))) return 0.6;
@@ -428,6 +477,10 @@ export async function fusedSearch(opts: FusedOptions): Promise<FusedResult> {
 	const engines = (opts.engines ?? TIER_ENGINES[tier]).filter(
 		(e) => ENGINE_FNS[e] && available.includes(e),
 	);
+	// free-mode fill: with no API keys the tier filter leaves only Bing; add the
+	// free Brave-HTML channel so keyless mode always has two independent engines
+	// for cross-checking (and Bing failures never mean zero results).
+	if (engines.length < 2 && available.includes("bravehtml")) engines.push("bravehtml");
 	// depth: advanced only pays 2x credits when content will actually be consumed
 	const depth = opts.depth ?? (tier === "complex" ? "advanced" : "basic");
 	const cache = opts.cache;

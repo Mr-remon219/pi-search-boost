@@ -10,7 +10,7 @@
 
 编码 agent 的默认 web 搜索通常是单引擎黑盒：无法交叉验证、无成本控制、不可观测，且模型要么少搜（凭过期记忆作答）要么滥搜（琐碎问题也搜）。pi-search-boost 逐一解决：
 
-- **四引擎融合检索** — Bing（免 key）+ Tavily + Exa + Brave 并行，按 URL 去重，按"引擎一致性与域名质量"交叉打分。两个以上独立引擎同时命中 = 高置信；单引擎噪音自动降级。
+- **五引擎融合检索** — Bing（免 key）+ Brave HTML（免 key）+ Tavily + Exa + Brave 并行；无 key 时也保持两个独立免费通道（Bing + Brave HTML）交叉验证，按 URL 去重，按"引擎一致性与域名质量"交叉打分。两个以上独立引擎同时命中 = 高置信；单引擎噪音自动降级。
 - **复杂度路由** — 搜索预算与查询复杂度绑定（Keiro / Adaptive-RAG 模式）：`simple` = 1 变体 × 2 引擎（1 credit）、`medium` = 2 × 3、`complex` = 3 × 4 + advanced 抽取（2 credits）。简单查询不再为深度研究买单。
 - **focus 定向抓取** — `fetch_page` 的 `focus` 参数只保留与查询相关的段落（Grok find_in_page / Anthropic dynamic filtering 模式）。实测 **省 95% token**（1136 词 → 61 词）。
 - **深度研究循环** — 检索 → 抓页 → 抽取 → 覆盖度检查 → 追问 → 收敛；逐来源佐证（关键声明需 ≥2 个独立域名）、时效感知。
