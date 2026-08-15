@@ -15,6 +15,8 @@ export class JsonCache {
 	private hits = 0;
 	private saves = 0;
 	private saveTimer: NodeJS.Timeout | null = null;
+	/** set by clear(): the next flush drops the on-disk contents instead of merging */
+	private cleared = false;
 	private readonly file: string;
 
 	constructor(filePath: string) {
@@ -56,6 +58,7 @@ export class JsonCache {
 
 	clear(): void {
 		this.data.clear();
+		this.cleared = true;
 		this.scheduleSave();
 	}
 
@@ -65,6 +68,12 @@ export class JsonCache {
 		this.saveTimer.unref?.();
 	}
 
+	/**
+	 * Persist to disk, merging whatever another process wrote since this one
+	 * loaded the file. `research_parallel` runs several pi processes against the
+	 * same cache file, and a plain whole-file rewrite made the last writer erase
+	 * every entry the others had added.
+	 */
 	flush(): void {
 		if (this.saveTimer) {
 			clearTimeout(this.saveTimer);
@@ -72,7 +81,25 @@ export class JsonCache {
 		}
 		try {
 			fs.mkdirSync(path.dirname(this.file), { recursive: true });
-			fs.writeFileSync(this.file, JSON.stringify(Object.fromEntries(this.data)));
+			const now = Date.now();
+			const merged = new Map<string, CacheEntry>();
+			if (!this.cleared) {
+				try {
+					const onDisk = JSON.parse(fs.readFileSync(this.file, "utf8")) as Record<string, CacheEntry>;
+					for (const [k, v] of Object.entries(onDisk)) {
+						if (v && typeof v.expiresAt === "number" && v.expiresAt > now) merged.set(k, v);
+					}
+				} catch {
+					// missing or corrupt file: this process's view becomes the new file
+				}
+			}
+			this.cleared = false;
+			for (const [k, v] of this.data) {
+				if (v.expiresAt > now) merged.set(k, v);
+			}
+			const tmp = `${this.file}.${process.pid}.tmp`;
+			fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(merged)));
+			fs.renameSync(tmp, this.file);
 			this.saves++;
 		} catch {
 			// best-effort persistence
