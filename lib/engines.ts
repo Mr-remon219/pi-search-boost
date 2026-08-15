@@ -10,6 +10,7 @@
  * Fused search: query variants x engines in parallel, then URL-level dedupe
  * and cross-engine scoring (rank weight + cross-engine bonus + domain quality).
  */
+import { execSync } from "node:child_process";
 import { JsonCache } from "./cache.ts";
 import {
 	collapseSpace, decodeBingUrl, decodeHtml, distinctiveTerms, domainMatches, fetchText,
@@ -56,9 +57,33 @@ interface RawHit {
 	content?: string;
 }
 
+/** User-level setx vars are not visible to already-running processes (or /reload). */
+const userEnvCache = new Map<string, string | undefined>();
+
+function envFromWindowsUser(name: string): string | undefined {
+	if (process.platform !== "win32") return undefined;
+	if (userEnvCache.has(name)) return userEnvCache.get(name);
+	try {
+		const raw = execSync(`reg query "HKCU\\Environment" /v ${name}`, {
+			encoding: "utf8",
+			windowsHide: true,
+			timeout: 2000,
+		});
+		const m = raw.match(/REG_(?:SZ|EXPAND_SZ)\s+(.+)$/m);
+		const val = m?.[1]?.trim() || undefined;
+		userEnvCache.set(name, val);
+		if (val) process.env[name] = val; // so later child processes inherit it
+		return val;
+	} catch {
+		userEnvCache.set(name, undefined);
+		return undefined;
+	}
+}
+
 function env(name: string): string | undefined {
 	const v = process.env[name];
-	return v && v.trim() !== "" ? v.trim() : undefined;
+	if (v && v.trim() !== "") return v.trim();
+	return envFromWindowsUser(name);
 }
 
 export const ENGINE_KEYS: Record<string, string> = {
