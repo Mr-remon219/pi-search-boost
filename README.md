@@ -22,9 +22,19 @@ Default web search in coding agents is usually a single-engine black box: no cro
 
 ---
 
-## Installation
+## Deployment
 
-### One-click (recommended)
+**This is a pi extension — deploy it with pi.** pi auto-discovers extensions in `~/.pi/agent/extensions/`, so deploying means copying files there and letting pi load them. No build step, no bundler, no other agent framework required (and it will not work in Claude Code / Codex / etc. — the tools are registered through pi's extension API).
+
+### Prerequisites
+
+- **pi** installed: `https://github.com/earendil-works/pi-coding-agent` (any recent version)
+- Node.js 20+ (or Bun) — pi's runtime
+- Optional: Tavily / Exa / Brave API keys (keyless mode works without any)
+
+### Step 1 — install the files (choose one)
+
+**Option A: one-click installer (recommended)**
 
 ```bash
 # Windows
@@ -36,7 +46,7 @@ chmod +x install.sh && ./install.sh
 
 The installer copies the extension to `~/.pi/agent/extensions/search-boost/` and optionally registers your API keys.
 
-### Manual
+**Option B: manual copy**
 
 ```bash
 mkdir -p ~/.pi/agent/extensions/search-boost/lib
@@ -44,11 +54,34 @@ cp index.ts ~/.pi/agent/extensions/search-boost/
 cp lib/*.ts ~/.pi/agent/extensions/search-boost/lib/
 ```
 
-Then **restart pi** (or run `/reload` in the TUI).
+### Step 2 — load it in pi
+
+Restart pi, or run `/reload` in the TUI. The four tools (`fused_search`, `fetch_page`, `deep_research`, `research_parallel`) and the two commands (`/search-cache`, `/search-audit`) become available automatically. The `<search_balance>` proactive-search policy is injected into the system prompt on agent start.
+
+### Step 3 — verify the deployment
+
+```bash
+# quick smoke test (runs the extension directly, no install needed):
+pi -ne -e ~/.pi/agent/extensions/search-boost/index.ts -p "fused_search 'tokio latest version'"
+
+# in the TUI, both should respond:
+/search-audit stats
+/search-cache stats
+```
+
+If `/search-audit` shows events after a search, deployment is live.
+
+### Uninstall
+
+```bash
+rm -rf ~/.pi/agent/extensions/search-boost
+```
+
+Then restart pi. Cache and audit files under `~/.pi/agent/` (`search-boost-cache.json`, `search-boost-audit.jsonl`) can also be removed.
 
 ### API keys (optional)
 
-Without any keys, the extension still works in **keyless mode** (Bing HTML + Jina Reader). For full power, set any of:
+Without any keys, the extension still works in **keyless mode** (Bing HTML + Brave HTML + Jina Reader). For full power, set any of:
 
 | Variable | Engine | Why |
 | --- | --- | --- |

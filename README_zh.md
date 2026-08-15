@@ -22,9 +22,19 @@
 
 ---
 
-## 安装
+## 部署
 
-### 一键安装（推荐）
+**这是 pi 的扩展——请直接用 pi 部署。** pi 会自动发现 `~/.pi/agent/extensions/` 下的扩展，部署 = 把文件放进去让 pi 加载。无需构建步骤、无需打包器、不需要任何其他 agent 框架（在 Claude Code / Codex 等环境中无法工作——工具通过 pi 的扩展 API 注册）。
+
+### 前置要求
+
+- **pi** 已安装：`https://github.com/earendil-works/pi-coding-agent`（任意较新版本）
+- Node.js 20+（或 Bun）——pi 的运行时
+- 可选：Tavily / Exa / Brave API key（免 key 模式不需要任何 key）
+
+### 第 1 步 — 安装文件（二选一）
+
+**方式 A：一键安装脚本（推荐）**
 
 ```bash
 # Windows
@@ -36,7 +46,7 @@ chmod +x install.sh && ./install.sh
 
 脚本会把扩展复制到 `~/.pi/agent/extensions/search-boost/`，并可选注册你的 API key。
 
-### 手动安装
+**方式 B：手动复制**
 
 ```bash
 mkdir -p ~/.pi/agent/extensions/search-boost/lib
@@ -44,11 +54,34 @@ cp index.ts ~/.pi/agent/extensions/search-boost/
 cp lib/*.ts ~/.pi/agent/extensions/search-boost/lib/
 ```
 
-然后**重启 pi**（或 TUI 内 `/reload`）。
+### 第 2 步 — 在 pi 中加载
+
+重启 pi，或 TUI 内运行 `/reload`。四个工具（`fused_search`、`fetch_page`、`deep_research`、`research_parallel`）和两个命令（`/search-cache`、`/search-audit`）自动可用；`<search_balance>` 主动搜索守则会在 agent 启动时注入系统提示。
+
+### 第 3 步 — 验证部署
+
+```bash
+# 快速冒烟测试（直接运行扩展，无需安装）：
+pi -ne -e ~/.pi/agent/extensions/search-boost/index.ts -p "fused_search 'tokio latest version'"
+
+# TUI 内这两个命令都应响应：
+/search-audit stats
+/search-cache stats
+```
+
+搜索后 `/search-audit` 能看到事件 = 部署生效。
+
+### 卸载
+
+```bash
+rm -rf ~/.pi/agent/extensions/search-boost
+```
+
+然后重启 pi。`~/.pi/agent/` 下的缓存与审计文件（`search-boost-cache.json`、`search-boost-audit.jsonl`）可一并删除。
 
 ### API keys（可选）
 
-不配任何 key 也能用——**免 key 模式**（Bing HTML + Jina Reader）。要满血请配置：
+不配任何 key 也能用——**免 key 模式**（Bing HTML + Brave HTML + Jina Reader）。要满血请配置：
 
 | 变量 | 引擎 | 说明 |
 | --- | --- | --- |
