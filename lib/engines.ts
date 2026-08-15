@@ -428,12 +428,38 @@ export function expandQueries(query: string, site?: string): string[] {
 
 /* --------------------------------- Scoring ----------------------------------- */
 
+// Score parameters centralized (x-algorithm params.rs style): the fusion score
+// is a weighted sum of independent signals — engine agreement, query relevance,
+// recency, domain authority — plus per-domain diversity decay.
+const SCORE_PARAMS = {
+	// engine agreement: bonus per additional engine that found the same URL
+	crossEngineBonus: 0.8,
+	crossEngineMax: 2.4,
+	// relevance: +0.25 per distinct query term in title/snippet (max 3 terms)
+	relPerTerm: 0.25,
+	relMaxTerms: 3,
+	relPenaltyMissing: -0.6, // none of the query terms matched
+	// recency: exponential half-life decay (Grok-style temporal_decay)
+	recencyBonus: 0.6,
+	recencyUndatedPenalty: -0.1,
+	// domain authority (x-algorithm 'new-author boost' inverse: authority upweight)
+	authoritativeBonus: 0.6,
+	wikipediaGithubBonus: 0.4,
+	junkPenalty: -0.5,
+	// per-domain diversity: soft decay like X's author-diversity multiplier
+	// (each further hit from the same domain × decay, down to a floor, then
+	// a hard cap to stop flooding) — replaces the old hard cut at 2/domain
+	domainDecay: 0.7,
+	domainFloor: 0.35,
+	domainHardCap: 5,
+};
+
 const ENGINE_WEIGHT: Record<string, number> = { bing: 1.0, bravehtml: 1.0, tavily: 1.2, exa: 1.2, brave: 1.1 };
 
 function domainBonus(domain: string): number {
-	if (AUTHORITATIVE_TLDS.some((t) => domain.endsWith(t))) return 0.6;
-	if (domain === "wikipedia.org" || domain === "github.com") return 0.4;
-	if (JUNK_DOMAINS.has(domain)) return -0.5;
+	if (AUTHORITATIVE_TLDS.some((t) => domain.endsWith(t))) return SCORE_PARAMS.authoritativeBonus;
+	if (domain === "wikipedia.org" || domain === "github.com") return SCORE_PARAMS.wikipediaGithubBonus;
+	if (JUNK_DOMAINS.has(domain)) return SCORE_PARAMS.junkPenalty;
 	return 0;
 }
 
@@ -619,21 +645,22 @@ export async function fusedSearch(opts: FusedOptions): Promise<FusedResult> {
 	const halfLifeMs = opts.recency
 		? RECENCY_HALF_LIFE_DAYS[opts.recency] * 86400000
 		: undefined;
-	const RECENCY_BONUS = 0.6;
 
 	// include mode wants more per-domain depth
-	const maxPerDomain = opts.maxPerDomain ?? (includeDomains.length > 0 ? Math.max(2, maxResults) : 2);
 	const relTerms = queryTerms(opts.query);
 	// relevance: bonus per query term found in title/snippet; penalty if none
 	const results = [...merged.values()]
 		.map((r) => {
-			const cross = Math.min(2.4, (r.engines.length - 1) * 0.8);
+			const cross = Math.min(SCORE_PARAMS.crossEngineMax, (r.engines.length - 1) * SCORE_PARAMS.crossEngineBonus);
 			const hay = `${r.title} ${r.snippet}`.toLowerCase();
 			let termHits = 0;
 			for (const t of relTerms) {
 				if (t.length >= 2 && hay.includes(t.toLowerCase())) termHits++;
 			}
-			const rel = termHits > 0 ? Math.min(termHits, 3) * 0.25 : -0.6;
+			const rel =
+				termHits > 0
+					? Math.min(termHits, SCORE_PARAMS.relMaxTerms) * SCORE_PARAMS.relPerTerm
+					: SCORE_PARAMS.relPenaltyMissing;
 			// recency: exponential half-life decay (Grok-style temporal_decay).
 			// dated: bonus = 0.6 * 0.5^(age/halfLife); undated: small neutral penalty.
 			let rec = 0;
@@ -642,28 +669,37 @@ export async function fusedSearch(opts: FusedOptions): Promise<FusedResult> {
 					const t = Date.parse(r.published);
 					if (!Number.isNaN(t)) {
 						const ageMs = Date.now() - t;
-						rec = ageMs > 0 ? RECENCY_BONUS * Math.pow(0.5, ageMs / halfLifeMs) : RECENCY_BONUS;
+						rec = ageMs > 0 ? SCORE_PARAMS.recencyBonus * Math.pow(0.5, ageMs / halfLifeMs) : SCORE_PARAMS.recencyBonus;
 					} else {
-						rec = -0.1;
+						rec = SCORE_PARAMS.recencyUndatedPenalty;
 					}
 				} else {
-					rec = -0.1;
+					rec = SCORE_PARAMS.recencyUndatedPenalty;
 				}
 			}
 			return { ...r, score: Math.round((r.score + cross + rel + rec + domainBonus(r.domain)) * 100) / 100 };
 		})
 		.sort((a, b) => b.score - a.score);
-	// per-domain cap: keep the highest-scoring hits per domain; drop noise
-	// below min_score (Grok's min_score threshold, 0.35 there; default 0 here).
+	// Per-domain diversity: soft decay (x-algorithm 'author diversity' pattern) —
+	// each further hit from the same domain is multiplied by a decaying factor
+	// down to a floor, instead of being hard-dropped at 2/domain. Keeps more
+	// long-tail results while stopping any single domain from dominating.
+	// Include-mode skips the decay (already client-filtered to the wanted domains).
 	const minScore = opts.minScore ?? 0;
+	const includeMode = includeDomains.length > 0;
 	const perDomain = new Map<string, number>();
 	const capped: typeof results = [];
 	for (const r of results) {
-		if (r.score < minScore) continue;
 		const n = perDomain.get(r.domain) ?? 0;
-		if (n >= maxPerDomain) continue;
+		const hardCap = includeMode ? Math.max(SCORE_PARAMS.domainHardCap, maxResults) : SCORE_PARAMS.domainHardCap;
+		if (n >= hardCap) continue;
+		let score = r.score;
+		if (!includeMode && n >= 1) {
+			score = Math.round(r.score * Math.max(SCORE_PARAMS.domainFloor, Math.pow(SCORE_PARAMS.domainDecay, n)) * 100) / 100;
+		}
+		if (score < minScore) continue;
 		perDomain.set(r.domain, n + 1);
-		capped.push(r);
+		capped.push(score === r.score ? r : { ...r, score });
 		if (capped.length >= maxResults) break;
 	}
 	return {
