@@ -186,6 +186,10 @@ lib/util.ts     超时/信号 fetch、HTML 实体解码、URL 归一化、CJK �
 23 轮实测迭代：从单引擎 Bing 抓取 → 四引擎融合 + 复杂度路由 → focus 定向读取（省 95% token）→ 深度研究 + 佐证 → 并行子 agent → 主动搜索守则（v3：防过度搜索停止规则；v4：自主兜底规则）→ 最终审计（修复参数暴露与尾部读取 bug）→ **第 23 轮：TUN fake-ip 豁免（Clash TUN 把所有 DNS 答成 198.18/15；SSRF 判定现对「全 fake-ip 的主机名解析」放行，字面量私网/回环/metadata 仍拦，可用 `PI_SEARCH_ALLOW_TUN_FAKEIP=0` 关闭）+ 双守则合并（主动搜索规则收敛为单一 `<search_balance>` 并新增工具路由段，独立 web-search-guidance 扩展退役）**。
 > 注意：Clash/sing-box TUN 用户不打此补丁时，`fetch_page`/`web_fetch` 会对每个真实 URL 报 "resolves to private IP 198.18.0.x"。
 
+## 友链
+
+- [Linux.do](https://linux.do/) — 友好的中文技术社区
+
 ## License
 
 MIT
