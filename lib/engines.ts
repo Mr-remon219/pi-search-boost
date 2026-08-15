@@ -13,7 +13,7 @@
 import { JsonCache } from "./cache.ts";
 import {
 	collapseSpace, decodeBingUrl, decodeHtml, distinctiveTerms, domainMatches, fetchText,
-	hostOf, normalizeUrl, pool, queryTerms, stripTags,
+	hostOf, normalizeUrl, pool, queryTerms, segmentCjk, STOPWORDS, stripTags,
 } from "./util.ts";
 
 export interface SearchHit {
@@ -86,8 +86,11 @@ export function availableEngines(): string[] {
  */
 export type Complexity = "simple" | "medium" | "complex";
 
+// Word-bounded on purpose: an unanchored /vs\.?/ matched the substring in
+// "vscode", "nvswitch", "vsphere" and routed those lookups to the 2-credit tier.
+// Chinese 怎么/如何/实现/最新 are too common to force complex.
 const RESEARCH_SIGNALS =
-	/compare|comparison|comparative|versus|vs\.?|difference|architecture|design|implement|how to|why|what is the best|review|benchmark|survey|tutorial|guide|optimization|performance|最新|综述|对比|区别|架构|设计|实现|原理|怎么|如何|选型|方案/i;
+	/\b(?:compare|comparison|comparative|versus|vs\.?|difference|architecture|design|implement|how to|why|what is the best|review|benchmark|survey|tutorial|guide|optimization|performance)\b|综述|对比|区别|架构|设计|原理|选型|方案/i;
 
 export function estimateComplexity(query: string): Complexity {
 	const tokens = queryTerms(query).length;
@@ -182,10 +185,18 @@ export function parseDate(raw: string | null | undefined): string | null {
 	return null;
 }
 
+/** Market for the keyless Bing HTML endpoint. Latin stays en-US (avoids the
+ * measured "tokio" → local-pop-culture SERP); Han / kana / hangul follow the query. */
+export function bingMarketForQuery(query: string): { mkt: string; setlang: string; cc: string } {
+	if (/[\u3040-\u30ff]/.test(query)) return { mkt: "ja-JP", setlang: "ja", cc: "JP" };
+	if (/[\uac00-\ud7af]/.test(query)) return { mkt: "ko-KR", setlang: "ko", cc: "KR" };
+	if (/[\u3400-\u9fff]/.test(query)) return { mkt: "zh-CN", setlang: "zh-Hans", cc: "CN" };
+	return { mkt: "en-US", setlang: "en", cc: "US" };
+}
+
 async function searchBingHtml(query: string, count: number): Promise<RawHit[]> {
-	// explicit en-US market: without it Bing serves the local region (measured:
-	// "tokio" -> Japanese boy band on this host); mkt/setlang pin the language
-	const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}&count=${Math.min(count, 20)}&mkt=en-US&setlang=en&cc=US`;
+	const { mkt, setlang, cc } = bingMarketForQuery(query);
+	const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}&count=${Math.min(count, 20)}&mkt=${mkt}&setlang=${setlang}&cc=${cc}`;
 	const res = await fetchText(url, { timeoutMs: 15000 });
 	if (!res.ok || res.text.length < 200) {
 		throw new Error(`bing http ${res.status}`);
@@ -252,7 +263,9 @@ async function searchTavily(query: string, count: number, o: EngineQueryOptions 
 		search_depth: o.depth ?? "basic",
 		max_results: count,
 		include_answer: false,
-		include_raw_content: false,
+		// advanced already pays 2x credits; without raw content the extra spend
+		// only buys a slightly longer NLP summary
+		include_raw_content: (o.depth ?? "basic") === "advanced",
 	};
 	// parameter-level domain filters and time range (native Tavily params —
 	// no query-string translation needed)
@@ -267,26 +280,35 @@ async function searchTavily(query: string, count: number, o: EngineQueryOptions 
 	});
 	if (!resp.ok) throw new Error(`tavily http ${resp.status}`);
 	const json = (await resp.json()) as {
-		results?: Array<{ title?: string; url?: string; content?: string }>;
+		results?: Array<{ title?: string; url?: string; content?: string; raw_content?: string | null }>;
 	};
 	return (json.results ?? [])
 		.filter((r) => r.url)
 		.slice(0, count)
-		.map((r) => ({
-			title: collapseSpace(r.title ?? ""),
-			url: r.url!,
-			// keep the full extracted text for direct consumption; snippet is the
-			// first 240 chars for compact display
-			snippet: collapseSpace(r.content ?? "").slice(0, 240),
-			content: r.content,
-		}));
+		.map((r) => {
+			const body = (r.raw_content && r.raw_content.trim()) || r.content || "";
+			return {
+				title: collapseSpace(r.title ?? ""),
+				url: r.url!,
+				snippet: collapseSpace(r.content ?? body).slice(0, 240),
+				content: body || undefined,
+			};
+		});
 }
 
 /* ------------------------------------ Exa ------------------------------------- */
 
 async function searchExa(query: string, count: number, o: EngineQueryOptions = {}): Promise<RawHit[]> {
 	const key = env(ENGINE_KEYS.exa)!;
-	const body: Record<string, unknown> = { query, numResults: count, contents: { text: false } };
+	// `contents: { text: false }` returned no text, so every Exa hit had an empty
+	// snippet and ate the missing-term penalty — Exa-only results were demoted.
+	const body: Record<string, unknown> = {
+		query,
+		numResults: count,
+		contents: { text: { maxCharacters: 4000 }, highlights: { numSentences: 3, highlightsPerUrl: 2 } },
+	};
+	if (o.includeDomains?.length) body.includeDomains = o.includeDomains.slice(0, 5);
+	if (o.excludeDomains?.length) body.excludeDomains = o.excludeDomains.slice(0, 5);
 	if (o.recency && RECENCY_TO_PARAM[o.recency]) {
 		const days = RECENCY_TO_PARAM[o.recency].days;
 		body.publishedAfter = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
@@ -299,7 +321,7 @@ async function searchExa(query: string, count: number, o: EngineQueryOptions = {
 	});
 	if (!resp.ok) throw new Error(`exa http ${resp.status}`);
 	const json = (await resp.json()) as {
-		results?: Array<{ title?: string; url?: string; text?: string; publishedDate?: string }>;
+		results?: Array<{ title?: string; url?: string; text?: string; highlights?: string[]; publishedDate?: string }>;
 	};
 	return (json.results ?? [])
 		.filter((r) => r.url)
@@ -307,16 +329,31 @@ async function searchExa(query: string, count: number, o: EngineQueryOptions = {
 		.map((r) => ({
 			title: collapseSpace(r.title ?? ""),
 			url: r.url!,
-			snippet: collapseSpace(r.text ?? ""),
+			snippet: collapseSpace(r.highlights?.join(" … ") || r.text || "").slice(0, 240),
 			content: r.text,
+			published: r.publishedDate ?? null,
 		}));
 }
 
 /* ----------------------------------- Brave ------------------------------------ */
 
+/** Brave's API has no include/exclude-domain fields; fold them into the query. */
+export function applyBraveSiteFilters(query: string, o: EngineQueryOptions = {}): string {
+	let q = query;
+	if (o.includeDomains?.length) {
+		const sites = o.includeDomains.map((d) => `site:${d}`);
+		q = `${q} ${sites.length === 1 ? sites[0] : `(${sites.join(" OR ")})`}`;
+	}
+	if (o.excludeDomains?.length) {
+		q = `${q} ${o.excludeDomains.map((d) => `-site:${d}`).join(" ")}`;
+	}
+	return q.replace(/\s+/g, " ").trim();
+}
+
 async function searchBrave(query: string, count: number, o: EngineQueryOptions = {}): Promise<RawHit[]> {
 	const key = env(ENGINE_KEYS.brave)!;
-	let url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${Math.min(count, 20)}`;
+	const q = applyBraveSiteFilters(query, o);
+	let url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(q)}&count=${Math.min(count, 20)}`;
 	if (o.recency && RECENCY_TO_PARAM[o.recency]) url += `&freshness=${RECENCY_TO_PARAM[o.recency].brave}`;
 	const resp = await fetch(url, {
 		headers: { "X-Subscription-Token": key, Accept: "application/json" },
@@ -401,28 +438,41 @@ const JUNK_DOMAINS = new Set([
 
 const AUTHORITATIVE_TLDS = [".gov", ".edu", ".mil"];
 
-/** Deterministic keyword-variant expansion (the "keyword search" step). */
+/** Words that describe the *kind* of answer wanted, not the subject matter. */
+const GENERIC_QUERY_WORDS = new Set([
+	"comparison", "compare", "versus", "vs", "best", "latest", "current", "newest",
+	"tutorial", "guide", "overview", "introduction", "intro", "difference",
+	"differences", "review", "benchmark", "example", "examples", "explanation",
+	"explained", "docs", "documentation", "reference", "status", "update", "updates",
+]);
+
+function informativeTerms(query: string): string[] {
+	return query.split(/\s+/).filter(Boolean).filter((tok) => {
+		const t = tok.toLowerCase().replace(/[^\p{L}\p{N}._-]/gu, "");
+		return t !== "" && !STOPWORDS.has(t) && !GENERIC_QUERY_WORDS.has(t) && !/^(?:19|20)\d{2}$/.test(t);
+	});
+}
+
+/**
+ * Deterministic keyword-variant expansion. One compact subject-term variant
+ * (not a blind 2/3-term prefix). CJK queries get a dictionary-segmented companion
+ * instead of the old fixed 2-char chunks (多引 / 擎检 / 索融).
+ */
 export function expandQueries(query: string, site?: string): string[] {
 	const clean = collapseSpace(query);
 	const variants = new Set<string>();
 	variants.add(clean);
-	// NOTE: no quoted-phrase variant — engines treat "q" and q as near-identical
-	// (measured 100% token overlap), so it only doubles the request count.
-	// keyword terms from the query itself
-	const terms = queryTerms(clean).filter((t) => t.length >= 3).slice(0, 4);
-	if (terms.length >= 2) variants.add(terms.slice(0, 2).join(" "));
-	if (terms.length >= 3) variants.add(terms.slice(0, 3).join(" "));
-	// CJK: split each contiguous run into 2-char chunks (natural Chinese keyword units)
-	const cjkRuns = clean.match(/[\u4e00-\u9fff]{2,}/g) ?? [];
+	const informative = informativeTerms(clean);
+	if (informative.length >= 2) {
+		const compact = informative.slice(0, 4).join(" ");
+		if (compact !== clean) variants.add(compact);
+	}
+	const cjkRuns = clean.match(/[\u3400-\u4dbf\u4e00-\u9fff]{2,}/g) ?? [];
 	for (const run of cjkRuns) {
-		const chunks: string[] = [];
-		for (let i = 0; i < run.length; i += 2) chunks.push(run.slice(i, i + 2));
-		if (chunks.length >= 2) variants.add(chunks.join(" "));
+		const words = segmentCjk(run);
+		if (words.length >= 2) variants.add(clean.replace(run, words.join(" ")));
 	}
-	// site-restricted variant
-	if (site) {
-		variants.add(`site:${site} ${clean}`);
-	}
+	if (site) variants.add(`site:${site} ${clean}`);
 	return [...variants].slice(0, 4);
 }
 
@@ -458,8 +508,10 @@ const ENGINE_WEIGHT: Record<string, number> = { bing: 1.0, bravehtml: 1.0, tavil
 
 function domainBonus(domain: string): number {
 	if (AUTHORITATIVE_TLDS.some((t) => domain.endsWith(t))) return SCORE_PARAMS.authoritativeBonus;
-	if (domain === "wikipedia.org" || domain === "github.com") return SCORE_PARAMS.wikipediaGithubBonus;
-	if (JUNK_DOMAINS.has(domain)) return SCORE_PARAMS.junkPenalty;
+	if (domainMatches(domain, "wikipedia.org") || domainMatches(domain, "github.com")) {
+		return SCORE_PARAMS.wikipediaGithubBonus;
+	}
+	if ([...JUNK_DOMAINS].some((d) => domainMatches(domain, d))) return SCORE_PARAMS.junkPenalty;
 	return 0;
 }
 
@@ -490,6 +542,31 @@ export interface FusedOptions {
 	cache?: JsonCache;
 	signal?: AbortSignal;
 	progress?: (msg: string) => void;
+}
+
+/** Engines that scrape a results page and therefore ignore query options. */
+const HTML_ENGINES = ["bing", "bravehtml"];
+
+/**
+ * Cache key for one engine's answer to one query.
+ * Must cover everything that changes that answer: recency, depth, domain
+ * filters, and result count. HTML scrapers ignore those options, so their
+ * keys stay unfragmented.
+ */
+export function searchCacheKey(
+	engine: string,
+	query: string,
+	count: number,
+	o: EngineQueryOptions,
+): string {
+	const parts = [`n${count}`];
+	if (!HTML_ENGINES.includes(engine)) {
+		if (o.recency) parts.push(`r:${o.recency}`);
+		if (engine === "tavily" && o.depth) parts.push(`d:${o.depth}`);
+		if (o.includeDomains?.length) parts.push(`i:${[...o.includeDomains].sort().join(",")}`);
+		if (o.excludeDomains?.length) parts.push(`x:${[...o.excludeDomains].sort().join(",")}`);
+	}
+	return `search:${engine}:${parts.join("|")}:${query.toLowerCase()}`;
 }
 
 export async function fusedSearch(opts: FusedOptions): Promise<FusedResult> {
@@ -560,7 +637,7 @@ export async function fusedSearch(opts: FusedOptions): Promise<FusedResult> {
 
 	async function runBatch(batch: Array<{ engine: string; query: string }>) {
 		await pool(batch, 5, async ({ engine, query }) => {
-			const key = `search:${engine}:${query.toLowerCase()}`;
+			const key = searchCacheKey(engine, query, maxPerEngine, engineOpts);
 			const cached = cache?.get<RawHit[]>(key);
 			if (cached) {
 				cacheHits++;
@@ -642,9 +719,10 @@ export async function fusedSearch(opts: FusedOptions): Promise<FusedResult> {
 	const RECENCY_HALF_LIFE_DAYS: Record<string, number> = {
 		day: 0.5, week: 3, month: 15, year: 90,
 	};
-	const halfLifeMs = opts.recency
-		? RECENCY_HALF_LIFE_DAYS[opts.recency] * 86400000
-		: undefined;
+	const halfLifeMs =
+		opts.recency && RECENCY_HALF_LIFE_DAYS[opts.recency] !== undefined
+			? RECENCY_HALF_LIFE_DAYS[opts.recency] * 86400000
+			: undefined;
 
 	// include mode wants more per-domain depth
 	const relTerms = queryTerms(opts.query);
@@ -685,10 +763,13 @@ export async function fusedSearch(opts: FusedOptions): Promise<FusedResult> {
 	// down to a floor, instead of being hard-dropped at 2/domain. Keeps more
 	// long-tail results while stopping any single domain from dominating.
 	// Include-mode skips the decay (already client-filtered to the wanted domains).
+	// Decay the whole pool, then re-sort, then truncate. Decaying in-place
+	// while walking a pre-sorted list left the output non-monotonic and meant
+	// the decay could never promote a diverse result into the returned window.
 	const minScore = opts.minScore ?? 0;
 	const includeMode = includeDomains.length > 0;
 	const perDomain = new Map<string, number>();
-	const capped: typeof results = [];
+	const adjusted: typeof results = [];
 	for (const r of results) {
 		const n = perDomain.get(r.domain) ?? 0;
 		const hardCap = includeMode ? Math.max(SCORE_PARAMS.domainHardCap, maxResults) : SCORE_PARAMS.domainHardCap;
@@ -699,9 +780,9 @@ export async function fusedSearch(opts: FusedOptions): Promise<FusedResult> {
 		}
 		if (score < minScore) continue;
 		perDomain.set(r.domain, n + 1);
-		capped.push(score === r.score ? r : { ...r, score });
-		if (capped.length >= maxResults) break;
+		adjusted.push(score === r.score ? r : { ...r, score });
 	}
+	const capped = adjusted.sort((a, b) => b.score - a.score).slice(0, maxResults);
 	return {
 		query: opts.query,
 		queriesUsed: effectiveQueries,
