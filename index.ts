@@ -20,10 +20,10 @@ import { Type } from "typebox";
 import { JsonCache } from "./lib/cache.ts";
 import { AuditLog, type AuditFetchEvent } from "./lib/audit.ts";
 import { availableEngines, fusedSearch } from "./lib/engines.ts";
-import { fetchPage } from "./lib/extract.ts";
+import { excerptForTool, fetchPage } from "./lib/extract.ts";
 import { runResearch } from "./lib/research.ts";
 import { runParallelResearch } from "./lib/parallel.ts";
-import { hostOf } from "./lib/util.ts";
+import { countWords, hostOf } from "./lib/util.ts";
 
 export default function searchBoostExtension(pi: ExtensionAPI) {
 	const cache = new JsonCache(path.join(getAgentDir(), "search-boost-cache.json"));
@@ -215,12 +215,13 @@ During coding / development work, search BEFORE you write — never write code a
 				lines.push("No results. Consider retrying with different keyword variants or engines.");
 			}
 			res.results.forEach((r, i) => {
+				const usable = r.content && countWords(r.content) >= 300;
 				lines.push(
 					`${i + 1}. [${r.score}] ${r.title} (${r.domain}${r.published ? `, published ${r.published}` : ""})`,
 					`   ${r.url}`,
 					`   engines: ${r.engines.join(", ")}`,
-					r.content && r.content.trim().split(/\s+/).length >= 300
-						? `   [content: ${r.content.trim().split(/\s+/).length} words — usable directly, no fetch needed]`
+					usable
+						? `   [content: ${countWords(r.content!)} words — usable directly, no fetch needed]\n${excerptForTool(r.content!).split("\n").map((l) => `   ${l}`).join("\n")}`
 						: "",
 					r.snippet ? `   ${r.snippet.slice(0, 240)}` : "",
 					"",
@@ -405,10 +406,15 @@ During coding / development work, search BEFORE you write — never write code a
 			"deep_research corroboration: for key claims require >=2 independent domains (see corroboratedBy); if a claim is supported by only one source, explicitly mark it as single-source / unverified.",
 			"deep_research source hierarchy: prefer primary sources (official documentation, papers, raw data, .gov/.edu) over secondary ones (news, blogs); note when a claim rests on a secondary source.",
 			"deep_research freshness: for time-sensitive facts, state the access date (fetchedAt) and prefer recently fetched sources.",
-			"deep_research step mode: when mode=step, the report lists uncovered terms and suggested queries — call deep_research again with those queries to continue until coverage is reached.",
+			"deep_research step mode: when mode=step, the report lists uncovered terms and suggested queries — call deep_research again with those queries in `queries` to continue until coverage is reached.",
 		],
 		parameters: Type.Object({
 			query: Type.String({ description: "The research question" }),
+			queries: Type.Optional(
+				Type.Array(Type.String(), {
+					description: "Keyword variants for this round (step-mode continuation). If omitted, variants are derived from query.",
+				}),
+			),
 			goal: Type.Optional(Type.String({ description: "What the final answer must establish; used to judge coverage" })),
 			mode: Type.Optional(StringEnum(["auto", "step"], { default: "auto" })),
 			max_rounds: Type.Optional(Type.Integer({ minimum: 1, maximum: 5, default: 3 })),
@@ -430,6 +436,7 @@ During coding / development work, search BEFORE you write — never write code a
 			progress(`deep_research (${params.mode ?? "auto"}): "${params.query}"`);
 			const res = await runResearch({
 				query: params.query,
+				queries: params.queries,
 				goal: params.goal,
 				mode: params.mode === "step" ? "step" : "auto",
 				maxRounds: params.max_rounds,
