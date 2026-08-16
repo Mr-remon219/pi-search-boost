@@ -14,6 +14,7 @@
 - **聚焦过滤抓页** — `fetch_page` 的 `focus` 参数只保留与查询相关的段落（实测省 ~95% token）
 - **深度研究循环** — 检索 → 抓页 → 抽取 → 覆盖度检查 → 生成追问 → 收敛，带逐来源佐证（关键声明需 ≥2 个独立域名）
 - **并行多代理研究** — 把问题拆成 2-4 个子任务，每个作为独立 pi 子进程运行，各自有搜索预算
+- **X/Twitter 实时搜索** — `x_search`：托管 x_search 工具（grok 登录 / `XAI_API_KEY`）与融合多引擎（限 x.com）并行、结果去重合并；用户结构化资料走 X 匿名 guest GraphQL；oEmbed 全文增强；无任何凭据也能用（~2s 多引擎降级）
 - **缓存** — 搜索结果（6h）与页面（24h）落盘；热缓存命中 ~1ms，跨进程
 - **审计与可观测** — 每次搜索/抓页/研究事件都记 JSONL 日志（5MB 轮转），含层级、credits 估算、引擎错误、耗时；TUI 提供 `/search-audit` 与 `/search-cache` 命令
 - **前摄搜索策略** — 启动时注入 `<search_balance>` 规则集：何时默认搜索（任何一丝不确定），何时跳过，何时停止（约 3 轮收益递减），自治/兜底规则，以及写代码时的触发规则（对不确定的 API 先搜再写）
@@ -150,6 +151,21 @@ pi remove git:github.com/Mr-remon219/pi-search-boost
 - `/search-audit stats|recent|failures|domains|clear` — 分析审计日志：事件计数、抓取成功率、引擎错误、层级分布、Tavily credits 估算、失败域名
 - `/search-cache stats|clear` — 查看或清空缓存
 - `/x-login [|-k <XAI_API_KEY>|status]` — 把 xAI 凭据导入 pi 自己的目录供 x_search 使用（无参 = 从你的 grok 登录导入；`-k` = API key；`status` = 查看凭据链）
+- `/x-logout` — 删除 pi 本地凭据：官方托管 x_search 路径被禁用，x_search 只用多引擎 / guest-GraphQL / oEmbed 降级链（不影响 grok CLI 自己的登录；`/x-login` 可重新启用官方路径）
+
+### x_search 参数
+
+| 参数 | 说明 |
+| --- | --- |
+| `type` | `keyword`（X 高级语法：`from:user`、`since:YYYY-MM-DD`、`min_faves:N`）、`semantic`（自然语言）、`user`（结构化资料 + 时间线）、`thread`（按帖子 id / status URL 取完整对话） |
+| `query` / `username` / `post_id` | 按 type 分别指定目标 |
+| `from_date` / `to_date` | 日期范围（keyword/semantic） |
+| `allowed_x_handles` / `excluded_x_handles` | 托管工具级账号过滤（最多 20 个，互斥） |
+| `model` / `reasoning_effort` | 驱动模型（默认 `grok-4.6`）与推理强度（默认 `low` — 快且结果一致） |
+
+路由：`keyword`/`semantic` → 托管 x_search（grok 登录 / `XAI_API_KEY`）∥ 融合多引擎（限 x.com）并行、合并去重；**无凭据**时多引擎 + oEmbed 全文增强约 2s 返回。`user` → guest GraphQL（匿名 X 网页 API：粉丝数、简介、认证、带互动的最近帖）→ 多引擎账号链接。`thread` → oEmbed 单条全文。
+
+凭据：`/x-login` 把你的 grok 登录导入 pi 自己的目录（`~/.pi/agent/xsearch-auth.json`）；token 自动刷新（OIDC）。全程零子进程——pi 自己 POST Responses-API 请求。
 
 ---
 
@@ -157,10 +173,18 @@ pi remove git:github.com/Mr-remon219/pi-search-boost
 
 ```
 index.ts        工具注册（fused_search、fetch_page、deep_research、
-                research_parallel）、TUI 命令、<search_balance> 规则集注入
-lib/engines.ts  引擎适配（Bing HTML 带跳转解码与结构变化检测、Tavily、Exa、
-                Brave、Brave HTML）、查询预处理（site:/OR/引号）、复杂度路由、
-                跨引擎融合打分、recency 衰减
+                research_parallel、x_search）、TUI 命令、<search_balance> 规则集注入
+lib/engines.ts  引擎适配（Tavily、Exa、Brave API、exa-free MCP）、查询预处理
+                （site:/OR/引号）、复杂度路由、跨引擎融合打分、recency 衰减
+lib/xsearch.ts  x_search 主路径：pi 直接 POST Responses API（托管 x_search 工具），
+                用 grok 的 OIDC 登录态或 XAI_API_KEY——零子进程；快速凭据预检
+lib/xauth.ts    x_search 凭据链：XAI_API_KEY 环境变量 → pi 本地副本
+                （xsearch-auth.json，由 /x-login 写入）→ 官方路径必须显式启用；
+                OIDC token 自动刷新（尽力同步 grok 文件）；/x-logout 删除副本
+lib/xfallback.ts 免凭据降级路由：多引擎（限 x.com）+ oEmbed 全文增强；guest
+                GraphQL（匿名 X 网页 API：token 缓存 2h、query id 404 自愈）
+                提供结构化用户资料
+lib/layer.ts    层级状态（free | api）落盘，/web_change 切换
 lib/extract.ts  Jina Reader + 本地启发式抽取 + 无头浏览器兜底、聚焦段落过滤
                 （动态过滤）、缓存
 lib/research.ts 深度研究循环：轮次、覆盖度检查、佐证、追问生成

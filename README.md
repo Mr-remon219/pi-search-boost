@@ -182,6 +182,7 @@ Credentials: `/x-login` imports your grok login into pi's own directory (`~/.pi/
 
 - `/web_change [free|api|show]` — switch the search layer (free = keyless Exa MCP single engine; api = tavily+brave+exa fusion)
 - `/x-login [|-k <XAI_API_KEY>|status]` — import xAI credentials into pi's own directory for x_search (bare = from your grok login; `-k` = API key; `status` = show the credential chain)
+- `/x-logout` — remove pi-local credentials: the official hosted x_search path is disabled, x_search falls back to the multi-engine / guest-GraphQL / oEmbed chain only (grok CLI's own login is untouched; `/x-login` re-enables the official path)
 - `/search-audit stats|recent|failures|domains|clear` — analyze the audit log: event counts, fetch success rates, engine errors, tier distribution, Tavily credit estimate, failing domains
 - `/search-cache stats|clear` — inspect or clear the cache
 
