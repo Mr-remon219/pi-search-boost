@@ -7,7 +7,10 @@
  * Step 6: TTL cache + URL dedupe (lib/cache.ts, lib/util.ts)
  *
  * Install: this directory lives in ~/.pi/agent/extensions/ (auto-discovered).
- * Optional env keys (without them, keyless Bing HTML + Jina Reader still work):
+ * Two search layers, switched with /web_change (see lib/layer.ts):
+ *   - free: keyless Exa MCP (exa-free) — no keys required, single engine
+ *   - api : Tavily + Brave + Exa API keys
+ * Env keys (api layer):
  *   PI_SEARCH_TAVILY_KEY, PI_SEARCH_EXA_KEY, PI_SEARCH_BRAVE_KEY
  *   PI_SEARCH_CACHE_TTL (search cache seconds, default 21600)
  *   PI_SEARCH_PAGE_TTL  (page cache seconds,  default 86400)
@@ -21,6 +24,7 @@ import { JsonCache } from "./lib/cache.ts";
 import { AuditLog, type AuditFetchEvent } from "./lib/audit.ts";
 import { availableEngines, fusedSearch } from "./lib/engines.ts";
 import { excerptForTool, fetchPage } from "./lib/extract.ts";
+import { LAYER_LABELS, getLayer, setLayer } from "./lib/layer.ts";
 import { runResearch } from "./lib/research.ts";
 import { runParallelResearch } from "./lib/parallel.ts";
 import { countWords, hostOf } from "./lib/util.ts";
@@ -57,8 +61,8 @@ Depth by stakes:
 - Questions shaping the user's work (thesis decisions, architecture): verify properly — fused_search with variants, or deep_research, then cite URLs
 - Never answer a technical question with a possibly-outdated fact when a 2-second search settles it
 
-Tool routing (single source of truth — prefer these over the generic web_search/web_fetch):
-- Single-point lookup: one fused_search (simple tier) or web_search — no ceremony
+Tool routing (single source of truth):
+- Single-point lookup: one fused_search (simple tier) — no ceremony
 - Need a page's content: fetch_page, with focus when you only need part of it
 - Multi-angle / comparison / research: fused_search with variants; deep_research for a single deep dive; research_parallel for separable angles
 - Local files/code can answer it: no search at all
@@ -70,6 +74,8 @@ Stop when (anti-over-search):
 - You have what the user asked for — do not extend search scope without being asked
 
 Search has a cost: a simple query costs ~1 credit, an advanced query ~2 (Tavily); multi-step research multiplies token use 4x+. Choose the cheapest tier that answers the question, and stop when the next search adds less value than the answer you can already write.
+
+The active search layer (set with /web_change) is free = keyless Exa MCP, single engine, ~2-3s per call, occasional 429; api = tavily+brave+exa multi-engine fusion. In free layer prefer fewer variants, lean on cache, and treat 429 as a signal to switch to api rather than retrying the same call.
 
 Autonomy when tools fall short (do not stall, do not give up):
 - If search results are thin or miss the point, refine and retry once with a new angle (different terms, English/Chinese, narrower site target) — a second attempt is normal; a third identical attempt is a loop (stop)
@@ -123,14 +129,15 @@ During coding / development work, search BEFORE you write — never write code a
 		name: "fused_search",
 		label: "Fused Web Search",
 		description:
-			"Multi-engine web search: runs several keyword variants across Bing (keyless) plus any configured engines (Tavily/Exa/Brave) in parallel, deduplicates by URL, and cross-ranks results by engine agreement and domain quality. Returns up to max_results ranked hits with the engines that found each one. For quick single lookups web_search is fine; use fused_search when the question is multi-faceted, needs breadth, or benefits from keyword variants.",
+			"Web search: runs keyword variants across the active layer's engines in parallel (layer = api: Tavily/Brave/Exa APIs, or free: keyless Exa MCP; switched with /web_change), deduplicates by URL, and cross-ranks results by engine agreement and domain quality. Returns up to max_results ranked hits with the engines that found each one. This is the only search tool — use it for everything from single quick lookups to multi-faceted research (pass complexity simple for the former).",
 		promptSnippet: "Search the web across multiple engines in parallel with keyword variants",
 		promptGuidelines: [
-			"fused_search: use it for anything beyond a quick lookup — it runs multiple keyword variants across several engines in parallel, then dedupes and cross-ranks results. Prefer it over web_search for multi-faceted or research-oriented questions.",
+			"fused_search: it is the single search entry point — for a quick lookup pass complexity=simple (1 variant, cheap); for multi-faceted or research-oriented questions let the tier default to medium/complex and give keyword variants.",
 			"fused_search query style: write queries like Grok Build does — stack 3-6 domain keywords plus a few specific terms (e.g. \"OpenRLHF architecture training rollout infrastructure documentation\"). You may use `site:example.com` (auto-translated to a client-side include filter) and `\"phrase\" OR \"phrase2\"` (auto-split into parallel query variants).",
 			"fused_search angles: when a topic needs depth, call it repeatedly with a different angle each time (component, use-case, comparison, official docs, community discussion) instead of one broad query.",
 			"fused_search: when a term is ambiguous, pass `exclude_domains` to drop known noise (e.g. exclude wikipedia.org / baike.baidu.com when the query has a generic acronym).",
 			"fused_search: for time-sensitive questions pass `recency` (day/week/month/year) — results with a publish date outside the window are demoted, and dated results are shown with their publish date.",
+			"fused_search: the active layer (free = keyless Exa MCP single engine; api = tavily+brave+exa) is selected with /web_change. In free layer expect fewer cross-engine hits and possible 429 — prefer fewer variants and rely on cache; switch to api when stakes are high.",
 			"fused_search: to restrict to specific sites use `include_domains` (e.g. official docs domains); note engines ignore site: operators, so this is a strict client-side filter.",
 		],
 		parameters: Type.Object({
@@ -139,7 +146,7 @@ During coding / development work, search BEFORE you write — never write code a
 				Type.Array(Type.String(), { description: "Optional keyword variants; if omitted, variants are derived automatically" }),
 			),
 			engines: Type.Optional(
-				Type.Array(Type.String(), { description: `Engine subset: ${availableEngines().join(", ")} (default: all available)` }),
+				Type.Array(Type.String(), { description: "Engine subset override (default: active layer's engines; run /web_change to switch layers)" }),
 			),
 			max_results: Type.Optional(Type.Integer({ minimum: 1, maximum: 20, default: 10, description: "Max fused results" })),
 			site: Type.Optional(Type.String({ description: "Deprecated: restrict to a domain (alias for include_domains)" })),
@@ -164,7 +171,7 @@ During coding / development work, search BEFORE you write — never write code a
 			),
 			complexity: Type.Optional(
 				StringEnum(["auto", "simple", "medium", "complex"], {
-					description: "Search budget tier: auto = heuristic (default). simple = 2 engines/1 variant (cheap lookups), medium = 3 engines/2 variants, complex = 4 engines/3 variants + advanced depth (research). Explicit tier overrides the heuristic.",
+					description: "Search budget tier: auto = heuristic (default). simple = tavily+brave / 1 variant, medium = tavily+brave+exa / 2 variants, complex = same 3 engines / 3 variants + Tavily advanced. Explicit tier overrides the heuristic.",
 				}),
 			),
 		}),
@@ -202,6 +209,7 @@ During coding / development work, search BEFORE you write — never write code a
 				results: res.results.length,
 				cacheHits: res.cacheHits,
 				tier: res.tier,
+				layer: res.layer,
 				tookMs: Date.now() - started,
 				topUrls: res.results.slice(0, 5).map((r) => r.url),
 			});
@@ -210,8 +218,10 @@ During coding / development work, search BEFORE you write — never write code a
 				.join(", ");
 			const lines: string[] = [
 				`Fused search: "${res.query}"`,
+				`Layer: ${res.layer} — ${LAYER_LABELS[res.layer]}`,
 				`Tier: ${res.tier} — Queries used: ${res.queriesUsed.join(" | ")}`,
 				`Engines: ${stats} — cache hits: ${res.cacheHits} — ${res.tookMs}ms`,
+				...res.warnings.map((w) => `WARNING: ${w}`),
 				res.filters.includeDomains.length > 0 ? `Include domains: ${res.filters.includeDomains.join(", ")}` : "",
 				res.filters.excludeDomains.length > 0 ? `Excluded domains: ${res.filters.excludeDomains.join(", ")}` : "",
 				res.filters.recency && res.filters.recency !== "any" ? `Recency: ${res.filters.recency}` : "",
@@ -249,7 +259,7 @@ During coding / development work, search BEFORE you write — never write code a
 			"Fetch a URL and extract its readable content as Markdown. Uses the Jina Reader service (keyless) with a local heuristic extractor as fallback. Returns title, content (truncated to max_chars at a paragraph boundary), word count, fetch method, timestamp, and outbound link domains. Results are cached for 24h.",
 		promptSnippet: "Fetch a web page and extract readable content",
 		promptGuidelines: [
-			"fetch_page: use it to read full pages when search snippets are not enough. Prefer it over web_fetch when you want clean article text or the page's outbound link domains.",
+			"fetch_page: use it to read full pages when search snippets are not enough — it returns clean article text plus the page's outbound link domains.",
 			"fetch_page focus: pass the `focus` parameter (your question or the specific thing you need) to keep only relevant paragraphs — typically drops 80-95% of tokens. Always pass focus when you only need part of a page.",
 		],
 		parameters: Type.Object({
@@ -426,7 +436,7 @@ During coding / development work, search BEFORE you write — never write code a
 			max_rounds: Type.Optional(Type.Integer({ minimum: 1, maximum: 5, default: 3 })),
 			max_sources: Type.Optional(Type.Integer({ minimum: 2, maximum: 15, default: 8 })),
 			per_round: Type.Optional(Type.Integer({ minimum: 2, maximum: 6, default: 4, description: "Pages fetched per round" })),
-			engines: Type.Optional(Type.Array(Type.String(), { description: `Engine subset: ${availableEngines().join(", ")}` })),
+			engines: Type.Optional(Type.Array(Type.String(), { description: "Engine subset override (default: active layer's engines; run /web_change to switch layers)" })),
 			include_domains: Type.Optional(
 				Type.Array(Type.String(), { description: "Only research these domains (strict client-side filter)" }),
 			),
@@ -599,13 +609,19 @@ During coding / development work, search BEFORE you write — never write code a
 			}
 			const avg = (arr: number[]) => (arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) : 0);
 			const tierCounts = new Map<string, number>();
+			const layerCounts = new Map<string, number>();
 			for (const e of searches) {
-				if (e.type === "search" && e.tier) tierCounts.set(e.tier, (tierCounts.get(e.tier) ?? 0) + 1);
+				if (e.type !== "search") continue;
+				if (e.tier) tierCounts.set(e.tier, (tierCounts.get(e.tier) ?? 0) + 1);
+				if (e.layer) layerCounts.set(e.layer, (layerCounts.get(e.layer) ?? 0) + 1);
 			}
-			// tavily credit estimate: basic=1, advanced=2 (per query per variant)
+			// tavily credit estimate: basic=1, advanced=2 (per query per variant).
+			// Only searches where tavily actually ran consume credits — exa-free
+			// (free layer) and brave/exa-only searches cost tavily nothing.
 			let creditEstimate = 0;
 			for (const e of searches) {
 				if (e.type !== "search") continue;
+				if (!e.engines.includes("tavily")) continue;
 				const depth = e.tier === "complex" ? 2 : 1;
 				creditEstimate += depth * Math.max(1, e.queriesUsed.length);
 			}
@@ -644,7 +660,7 @@ During coding / development work, search BEFORE you write — never write code a
 								.reduce((m, [e, msg]) => m.set(e, (m.get(e) ?? 0) + 1), new Map<string, number>()),
 						),
 					)}`,
-					`tiers: ${[...tierCounts.entries()].map(([t, n]) => `${t}=${n}`).join(", ") || "(no tier data)"} | tavily credits est: ~${creditEstimate} (free 1000/mo)`,
+					`tiers: ${[...tierCounts.entries()].map(([t, n]) => `${t}=${n}`).join(", ") || "(no tier data)"} | layers: ${[...layerCounts.entries()].map(([l, n]) => `${l}=${n}`).join(", ") || "(no layer data)"} | tavily credits est: ~${creditEstimate} (free 1000/mo)`,
 					dupLines.length > 0 ? `repeated queries (loop?): ${dupLines.join(" | ")}` : "no repeated queries",
 					topErrDomains.length
 						? `top failing domains: ${topErrDomains.map(([d, n]) => `${d}(${n})`).join(", ")}`
@@ -653,6 +669,28 @@ During coding / development work, search BEFORE you write — never write code a
 				].join("\n"),
 				"info",
 			);
+		},
+	});
+
+	pi.registerCommand("web_change", {
+		description: "Switch the search layer: free (keyless Exa MCP, single engine) vs api (Tavily+Brave+Exa). Usage: /web_change [free|api|show]",
+		handler: async (args, ctx) => {
+			const cmd = (args ?? "").trim().toLowerCase();
+			const current = getLayer();
+			if (cmd === "free" || cmd === "api") {
+				setLayer(cmd);
+				ctx.ui.notify(`web layer: ${current} → ${cmd} — ${LAYER_LABELS[cmd]}. Future fused_search calls use this layer.`, "info");
+				return;
+			}
+			if (cmd === "show" || cmd === "") {
+				const available = availableEngines();
+				ctx.ui.notify(
+					`web layer: ${current} — ${LAYER_LABELS[current]}\nengines available in this layer: ${available.join(", ") || "(none — no API keys configured)"}`,
+					"info",
+				);
+				return;
+			}
+			ctx.ui.notify("usage: /web_change [free|api|show]", "info");
 		},
 	});
 }

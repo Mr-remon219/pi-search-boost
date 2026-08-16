@@ -19,6 +19,8 @@ export interface AuditSearchEvent {
 	cacheHits: number;
 	/** complexity tier used (simple/medium/complex) */
 	tier?: string;
+	/** search layer used (free | api) */
+	layer?: string;
 	tookMs: number;
 	topUrls: string[];
 }

@@ -65,7 +65,7 @@ function buildSubtaskPrompt(subtask: string, maxSources: number): string {
 		`<subtask>${subtask}</subtask>`,
 		``,
 		`Rules:`,
-		`- Use fused_search with 2-4 keyword variants (different angles/phrasings; site: and OR are auto-translated).`,
+		`- Use fused_search with 2-4 keyword variants (different angles/phrasings; site: and OR are auto-translated). If searches fail with rate-limit (429), drop to 1 variant and continue with what you have.`,
 		`- Fetch promising pages with fetch_page when snippets are insufficient.`,
 		`- Return a concise report: findings with source URLs inline, at most ${maxSources} sources.`,
 		`- Mark unverified or single-source claims explicitly.`,

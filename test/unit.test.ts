@@ -11,7 +11,6 @@ import { describe, it } from "node:test";
 import { JsonCache } from "../lib/cache.ts";
 import {
 	applyBraveSiteFilters,
-	bingMarketForQuery,
 	estimateComplexity,
 	expandQueries,
 	parseDate,
@@ -19,6 +18,7 @@ import {
 	searchCacheKey,
 } from "../lib/engines.ts";
 import { excerptForTool, pickExcerpts, pickParagraphs } from "../lib/extract.ts";
+import { getLayer, setLayer } from "../lib/layer.ts";
 import { plannedResearchRounds } from "../lib/research.ts";
 import {
 	assertPublicHttpUrl,
@@ -166,10 +166,10 @@ describe("search cache key", () => {
 		);
 	});
 
-	it("does not fragment the keyless channels, which ignore those options", () => {
+	it("does not fragment optionless engines (exa-free ignores those options)", () => {
 		assert.equal(
-			searchCacheKey("bing", q, 8, { recency: "day", depth: "advanced", includeDomains: ["kubernetes.io"] }),
-			searchCacheKey("bing", q, 8, {}),
+			searchCacheKey("exa-free", q, 8, { recency: "day", depth: "advanced", includeDomains: ["kubernetes.io"] }),
+			searchCacheKey("exa-free", q, 8, {}),
 		);
 	});
 });
@@ -199,12 +199,6 @@ describe("diversity decay re-sort", () => {
 });
 
 describe("engine query adapters", () => {
-	it("pins Bing to zh-CN for Han queries and en-US otherwise", () => {
-		assert.equal(bingMarketForQuery("如何优化检索").mkt, "zh-CN");
-		assert.equal(bingMarketForQuery("tokio latest version").mkt, "en-US");
-		assert.equal(bingMarketForQuery("非同期ランタイム").mkt, "ja-JP");
-	});
-
 	it("folds Brave domain filters into site: operators", () => {
 		assert.equal(
 			applyBraveSiteFilters("tokio runtime", { includeDomains: ["docs.rs"] }),
@@ -214,6 +208,19 @@ describe("engine query adapters", () => {
 			applyBraveSiteFilters("rag", { includeDomains: ["arxiv.org", "github.com"], excludeDomains: ["pinterest.com"] }),
 			"rag (site:arxiv.org OR site:github.com) -site:pinterest.com",
 		);
+	});
+});
+
+describe("web layer state", () => {
+	it("defaults to api and round-trips a switch", () => {
+		// layer state is a module-level singleton backed by a file; this test
+		// exercises the setter/getter contract, then restores the default.
+		const before = getLayer();
+		assert.ok(before === "api" || before === "free");
+		setLayer("free");
+		assert.equal(getLayer(), "free");
+		setLayer("api");
+		assert.equal(getLayer(), "api");
 	});
 });
 
@@ -301,13 +308,13 @@ describe("JsonCache", () => {
 		const file = tmpFile();
 		const parent = new JsonCache(file);
 		const child = new JsonCache(file);
-		parent.set("search:bing:a", [1], 3600);
+		parent.set("search:exa-free:a", [1], 3600);
 		parent.flush();
-		child.set("search:bing:b", [2], 3600);
+		child.set("search:exa-free:b", [2], 3600);
 		child.flush();
 		const reloaded = new JsonCache(file);
-		assert.deepEqual(reloaded.get("search:bing:a"), [1]);
-		assert.deepEqual(reloaded.get("search:bing:b"), [2]);
+		assert.deepEqual(reloaded.get("search:exa-free:a"), [1]);
+		assert.deepEqual(reloaded.get("search:exa-free:b"), [2]);
 	});
 
 	it("drops expired entries on flush", () => {

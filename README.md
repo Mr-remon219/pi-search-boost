@@ -8,9 +8,9 @@ The behavior layer is guided by a proactive-search policy (the `<search_balance>
 
 ## What you get
 
-- **Fused multi-engine search** — Bing (keyless) + Brave HTML (keyless) + Tavily + Exa + Brave in parallel; keyless mode always keeps two independent free channels (Bing + Brave HTML) for cross-checking
+- **Fused multi-engine search** — Tavily + Brave API + Exa in parallel (HTML scrapers retired)
 - **Cross-engine ranking** — deduplicated by URL, cross-ranked by engine agreement and domain quality, with per-domain soft diversity decay; a result found by 2+ independent engines is high-confidence, single-engine noise is demoted
-- **Complexity routing** — search budget bound to query complexity: `simple` = 1 variant × 2 engines (1 credit), `medium` = 2 × 3, `complex` = 3 × 4 + advanced extraction (2 credits)
+- **Complexity routing** — search budget bound to query complexity: `simple` = 1 variant × 2 engines (Tavily + Brave, 1 credit), `medium`/`complex` = 2–3 variants × Tavily + Brave + Exa (`complex` uses Tavily advanced, 2 credits)
 - **Focus-filtered page reading** — `fetch_page` with a `focus` parameter keeps only query-relevant paragraphs (measured ~95% token savings)
 - **Deep research loop** — search → fetch → extract → coverage check → follow-up queries → converge, with per-source corroboration (≥2 independent domains for key claims)
 - **Parallel multi-agent research** — decompose a question into 2-4 subtasks, each run as an independent pi subprocess with its own search budget
@@ -61,21 +61,30 @@ Copies the extension to `~/.pi/agent/extensions/search-boost/` (pi auto-discover
 
 Once installed, paste this into a pi session — the agent reads this README and does the rest:
 
-> Read this README and complete the setup for me: confirm the extension loaded (search-audit stats), install the optional companion package `@bytetrue/pi-web-search` so I also get `web_search` / `web_fetch`, walk me through API keys (or configure the ones I paste), and run the verification steps.
-
-### Optional companion: `web_search` / `web_fetch`
-
-This package provides `fused_search`, `fetch_page`, `deep_research`, and `research_parallel`. The lighter `web_search` / `web_fetch` tools are **not part of this repo** — they come from the separate pi package [`@bytetrue/pi-web-search`](https://www.npmjs.com/package/@bytetrue/pi-web-search), which the policy's tool-routing section references for quick single-point lookups. Install it to get the same complete toolset:
-
-```bash
-pi install npm:@bytetrue/pi-web-search
-```
-
-> TUN note: if you run Clash/sing-box in TUN mode, `web_fetch` needs the same fake-ip carve-out patched into its `src/html.ts` (`BYTE_PI_WEB_ALLOW_TUN_FAKEIP=0` to disable) — a node_modules patch that must be re-applied after the package is upgraded. See the note under [Known limitations](#known-limitations).
+> Read this README and complete the setup for me: confirm the extension loaded (search-audit stats), walk me through API keys (or configure the ones I paste), and run the verification steps.
 
 ---
 
-## API keys (optional — keyless mode works without any)
+## Search layers: `/web_change`
+
+Two layers, switched at runtime (persisted to `~/.pi/agent/search-boost-layer.json`, default `api`):
+
+| Layer | Engines | Keys | Notes |
+| --- | --- | --- | --- |
+| `api` | Tavily + Brave + Exa API | `PI_SEARCH_TAVILY_KEY`, `PI_SEARCH_EXA_KEY`, `PI_SEARCH_BRAVE_KEY` | Multi-engine fusion, cross-engine scoring active |
+| `free` | `exa-free` (keyless Exa MCP, `mcp.exa.ai`) | none | Single engine, no fusion cross-check, ~2-3s/call, may 429; 429 hint suggests switching back to `api` |
+
+```
+/web_change          # show current layer + available engines
+/web_change free     # keyless Exa MCP, single engine
+/web_change api      # tavily + brave + exa multi-engine fusion
+```
+
+The choice is read at every `fused_search` call, so `deep_research` and `research_parallel` inherit the active layer automatically.
+
+---
+
+## API keys (required for the api layer; free layer needs none)
 
 Keys are **environment variables** (the extension does not read `.env` files):
 - Windows: `setx PI_SEARCH_TAVILY_KEY "..."` — the extension also reads `HKCU\Environment` directly, so `setx` takes effect without restarting processes
@@ -141,7 +150,7 @@ Manual installs: update by re-running `install.bat`/`install.sh`; uninstall with
 | --- | --- |
 | `query` | The question or topic |
 | `queries` | Optional keyword variants (auto-derived if omitted) |
-| `engines` | Subset: `bing` (keyless), `bravehtml` (keyless), `tavily`, `exa`, `brave` |
+| `engines` | Subset override: `tavily`, `exa`, `brave` (api layer) or `exa-free` (free layer); default = active layer's engines |
 | `max_results` | Max fused results (1-20, default 10) |
 | `include_domains` / `exclude_domains` | Hard client-side domain filters (engines ignore `site:` operators) |
 | `recency` | `day`/`week`/`month`/`year` — half-life exponential decay for dated results |
@@ -151,10 +160,11 @@ Manual installs: update by re-running `install.bat`/`install.sh`; uninstall with
 
 Query style: stack 3-6 domain keywords plus specific terms (Grok Build style). `site:example.com` is auto-translated to a client-side include filter; `"a" OR "b"` auto-splits into parallel variants.
 
-The optional companion package `@bytetrue/pi-web-search` adds `web_search` (single-engine lookup) and `web_fetch` (raw page fetch).
+`fused_search` is the single search entry point (quick lookups: `complexity: "simple"`); `fetch_page` handles all page reading. No companion package is needed.
 
 ### TUI commands
 
+- `/web_change [free|api|show]` — switch the search layer (free = keyless Exa MCP single engine; api = tavily+brave+exa fusion)
 - `/search-audit stats|recent|failures|domains|clear` — analyze the audit log: event counts, fetch success rates, engine errors, tier distribution, Tavily credit estimate, failing domains
 - `/search-cache stats|clear` — inspect or clear the cache
 
@@ -165,10 +175,10 @@ The optional companion package `@bytetrue/pi-web-search` adds `web_search` (sing
 ```
 index.ts        Tool registrations (fused_search, fetch_page, deep_research,
                 research_parallel), TUI commands, <search_balance> ruleset injection
-lib/engines.ts  Engine adapters (Bing HTML w/ redirect decoding + structure-change
-                detection, Tavily, Exa, Brave, Brave HTML), query preprocessing
+lib/engines.ts  Engine adapters (Tavily, Exa, Brave API, exa-free MCP), query preprocessing
                 (site:/OR/quotes), complexity routing, cross-engine fusion scoring,
                 recency decay
+lib/layer.ts    Layer state (free | api) with disk persistence, switched by /web_change
 lib/extract.ts  Jina Reader + local heuristic extractor + headless-browser fallback,
                 focus paragraph filtering (dynamic filtering), caching
 lib/research.ts Deep research loop: rounds, coverage check, corroboration, follow-ups
@@ -211,16 +221,15 @@ lib/util.ts     fetch with timeout/signal, HTML decoding, URL normalization, CJK
 
 - **X/Twitter data**: not included (X API is paid; guest-token scraping is dead since 2025). Tavily/Exa indexes are the practical substitute.
 - **Model-native triggering**: search triggering is policy-driven (system prompt), not RL-trained into the model.
-- **Bing HTML parsing**: depends on Bing's page structure; structure changes are detected and fail loudly (never silently empty results).
-- **No self-hosted index**: retrieval is proxied via 4 engines; there is no local index of the web.
-- **Free channels are rate-limited**: the keyless Brave HTML channel can return 429 under IP-level rate limiting; failures are audited and the engine is skipped (never silently empty).
+- **No self-hosted index**: retrieval is proxied via Tavily / Brave / Exa; there is no local index of the web.
+- **API keys required**: Bing HTML and Brave HTML scrapers were removed (wrong-entity pollution / IP 429). The `api` layer needs Tavily/Brave/Exa keys; the `free` layer needs none but is a single keyless engine (Exa MCP) that can rate-limit (429) — switch back with `/web_change api`.
 
 ---
 
 ## Development history
 
 23 measured iterations (see the repo commit history): from single-engine Bing scraping → 4-engine fusion with complexity routing → focus-filtered reading (95% token savings) → deep research with corroboration → parallel subagents → proactive-search policy (v3: anti-over-search stop rules; v4: autonomy/fallback rules) → audit fixes → **round 23: TUN fake-ip carve-out (Clash TUN answers every DNS query with 198.18/15; the SSRF guard now allows an all-fake-ip hostname resolution while literal private IPs / loopback / metadata stay blocked; opt out with `PI_SEARCH_ALLOW_TUN_FAKEIP=0`) + single-policy merge (deduplicated the proactive-search ruleset into one `<search_balance>` with an explicit tool-routing section; the standalone web-search-guidance extension was retired).**
-> Note for Clash/sing-box TUN users: without this fix, `fetch_page` fails on every real URL with "resolves to private IP 198.18.0.x". If you also use the `@bytetrue/pi-web-search` package, its bundled `web_fetch` has the same guard and needs the identical carve-out patched into `src/html.ts` (`assertPublicResolution`, opt out with `BYTE_PI_WEB_ALLOW_TUN_FAKEIP=0`) — a node_modules patch that must be re-applied after the package is upgraded.
+> Note for Clash/sing-box TUN users: without this fix, `fetch_page` fails on every real URL with "resolves to private IP 198.18.0.x".
 
 ---
 

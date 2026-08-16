@@ -8,7 +8,7 @@
 
 ## 你能得到什么
 
-- **融合多引擎搜索** — Bing（免 key）+ Brave HTML（免 key）+ Tavily + Exa + Brave 并行；keyless 模式始终保留两个独立免费通道（Bing + Brave HTML）交叉验证
+- **融合多引擎搜索** — api 层：Tavily + Brave API + Exa 并行；free 层：keyless Exa MCP（单引擎）。用 `/web_change` 切换
 - **跨引擎排序** — 按 URL 去重、按引擎共识与域名质量交叉排序，带每域名软多样性衰减；被 2+ 个独立引擎命中的结果是高置信，单引擎噪音被降权
 - **复杂度路由** — 搜索预算绑定查询复杂度：`simple` = 1 变体 × 2 引擎（1 credit）、`medium` = 2 × 3、`complex` = 3 × 4 + advanced 抽取（2 credits）
 - **聚焦过滤抓页** — `fetch_page` 的 `focus` 参数只保留与查询相关的段落（实测省 ~95% token）
@@ -61,21 +61,12 @@ chmod +x install.sh && ./install.sh
 
 安装后，把下面这段话粘贴给 pi——agent 会读这份 README 并自己完成：
 
-> 请阅读这份 README 帮我完成配置：确认扩展已加载（search-audit stats）、安装可选伴生包 `@bytetrue/pi-web-search` 让我也有 `web_search` / `web_fetch`、引导我配置 API keys（或配置我粘贴给你的 key）、并执行验证步骤。
+> 请阅读这份 README 帮我完成配置：确认扩展已加载（search-audit stats）、引导我配置 API keys（或配置我粘贴给你的 key）、并执行验证步骤。
 
-### 可选伴生包：`web_search` / `web_fetch`
-
-本包提供 `fused_search`、`fetch_page`、`deep_research`、`research_parallel`。轻量的 `web_search` / `web_fetch` 工具**不属于本仓库**——它们来自独立的 pi 包 [`@bytetrue/pi-web-search`](https://www.npmjs.com/package/@bytetrue/pi-web-search)，策略里的工具路由章节也引用了它们做快速单点查询。要获得同样的完整工具集，请安装：
-
-```bash
-pi install npm:@bytetrue/pi-web-search
-```
-
-> TUN 注意：如果使用 Clash/sing-box TUN 模式，`web_fetch` 需要在其 `src/html.ts` 里打同样的 fake-ip carve-out 补丁（`BYTE_PI_WEB_ALLOW_TUN_FAKEIP=0` 关闭）——这是 node_modules 补丁，包升级后要重打。详见[已知限制](#已知限制)。
 
 ---
 
-## API keys（可选——无 key 的 keyless 模式也能用）
+## API keys（api 层需要；free 层无需任何 key）
 
 Key 是**环境变量**（扩展不读 `.env` 文件）：
 - Windows：`setx PI_SEARCH_TAVILY_KEY "..."` —— 扩展会直接读 `HKCU\Environment`，所以 `setx` 无需重启进程即生效
@@ -141,7 +132,7 @@ pi remove git:github.com/Mr-remon219/pi-search-boost
 | --- | --- |
 | `query` | 问题或主题 |
 | `queries` | 可选关键词变体（省略时自动派生） |
-| `engines` | 引擎子集：`bing`（免 key）、`bravehtml`（免 key）、`tavily`、`exa`、`brave` |
+| `engines` | 引擎子集覆盖：`tavily`、`exa`、`brave`（api 层）或 `exa-free`（free 层）；默认 = 当前层的引擎 |
 | `max_results` | 最大融合结果数（1-20，默认 10） |
 | `include_domains` / `exclude_domains` | 客户端硬过滤域名（引擎忽略 `site:` 操作符） |
 | `recency` | `day`/`week`/`month`/`year` —— 带日期结果半衰期指数衰减 |
@@ -151,7 +142,7 @@ pi remove git:github.com/Mr-remon219/pi-search-boost
 
 查询风格：像 Grok Build 一样堆 3-6 个领域关键词加具体词。`site:example.com` 自动转成客户端 include 过滤；`"a" OR "b"` 自动拆成并行变体。
 
-可选伴生包 `@bytetrue/pi-web-search` 额外提供 `web_search`（单引擎查询）与 `web_fetch`（原始抓页）。
+`fused_search` 是唯一搜索入口（快速查询传 `complexity: "simple"`）；`fetch_page` 负责所有读页。无需任何伴生包。
 
 ### TUI 命令
 
@@ -211,21 +202,11 @@ lib/util.ts     带超时/信号的 fetch、HTML 解码、URL 归一化、CJK �
 - **模型原生触发**：搜索触发靠策略（系统提示词）驱动，不是 RL 训练进模型。
 - **Bing HTML 解析**：依赖 Bing 页面结构；结构变化会被检测并响亮失败（绝不静默返回空）。
 - **无自建索引**：检索走 4 个引擎代理，没有本地网页索引。
-- **免费通道有限流**：keyless 的 Brave HTML 通道在 IP 级限流下可能返回 429；失败会被审计记录并跳过该引擎（绝不静默返回空）。
+- **free 层是单引擎**：keyless 的 Exa MCP 可能 429；失败会大声报错并提示 `/web_change api`，绝不静默返回空、也绝不回退刮页。
 
 ---
 
 ## 开发历史
 
 23 轮实测迭代（详见仓库提交历史）：单引擎 Bing 抓取 → 4 引擎融合 + 复杂度路由 → 聚焦过滤抓页（95% token 节省）→ 带佐证的深度研究 → 并行子代理 → 前摄搜索策略（v3：反过度搜索停止规则；v4：自治/兜底规则）→ 审计修复 → **第 23 轮：TUN fake-ip carve-out（Clash TUN 对每个 DNS 查询都回 198.18/15；SSRF 防护现在允许全 fake-ip 主机名解析，但字面私网 IP / 回环 / metadata 仍被拦截；可用 `PI_SEARCH_ALLOW_TUN_FAKEIP=0` 关闭）+ 单策略合并（前摄搜索规则集去重合并为一个带显式工具路由章节的 `<search_balance>`；独立的 web-search-guidance 扩展退役）。**
-> Clash/sing-box TUN 用户注意：没有这个修复，`fetch_page` 会对每个真实 URL 报 "resolves to private IP 198.18.0.x"。如果你同时装了 `@bytetrue/pi-web-search` 包，它自带的 `web_fetch` 有同样的防护，需要在 `src/html.ts` 里打同样的 carve-out 补丁（`assertPublicResolution`，用 `BYTE_PI_WEB_ALLOW_TUN_FAKEIP=0` 关闭）——这是 node_modules 补丁，包升级后要重打。
-
----
-
-## 朋友们
-
-- [Linux.do](https://linux.do/) — 一个友好的中文技术社区
-
-## License
-
-MIT
+> Clash/sing-box TUN 用户注意：没有这个修复，`fetch_page` 会对每个真实 URL 报 "resolves to private IP 198.18.0.x"。

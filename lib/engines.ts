@@ -1,20 +1,25 @@
 /**
  * Fused multi-engine search (step 1).
  *
- * Engines:
- *  - bing    : keyless HTML scraping (works without any API key; redirect URLs decoded)
+ * Two layers, switched at runtime via `/web_change` (see lib/layer.ts):
+ *  - free: keyless Exa MCP (`web_search_exa` on mcp.exa.ai) — the only engine
+ *  - api : Tavily + Brave + Exa API routes (list below)
+ *
+ * Engines (api layer):
  *  - tavily  : agent-designed search API (PI_SEARCH_TAVILY_KEY) — langchain-ai's default choice
  *  - exa     : neural/semantic search (PI_SEARCH_EXA_KEY)
  *  - brave   : keyword search with operators (PI_SEARCH_BRAVE_KEY)
  *
  * Fused search: query variants x engines in parallel, then URL-level dedupe
  * and cross-engine scoring (rank weight + cross-engine bonus + domain quality).
+ * The free layer has a single engine, so the cross-engine bonus never fires.
  */
 import { execSync } from "node:child_process";
 import { JsonCache } from "./cache.ts";
+import { getLayer, type WebLayer } from "./layer.ts";
 import {
-	collapseSpace, decodeBingUrl, decodeHtml, distinctiveTerms, domainMatches, fetchText,
-	hostOf, normalizeUrl, pool, queryTerms, segmentCjk, STOPWORDS, stripTags,
+	collapseSpace, distinctiveTerms, domainMatches,
+	hostOf, normalizeUrl, pool, queryTerms, segmentCjk, STOPWORDS,
 } from "./util.ts";
 
 export interface SearchHit {
@@ -45,6 +50,10 @@ export interface FusedResult {
 	filters: { includeDomains: string[]; excludeDomains: string[]; recency?: string };
 	/** complexity tier actually used (for audit/transparency) */
 	tier: Complexity;
+	/** active layer at query time (free | api) */
+	layer: WebLayer;
+	/** non-fatal issues surfaced to the caller (e.g. dead-pool fallback) */
+	warnings: string[];
 }
 
 interface RawHit {
@@ -93,7 +102,9 @@ export const ENGINE_KEYS: Record<string, string> = {
 };
 
 export function availableEngines(): string[] {
-	const list = ["bing", "bravehtml"]; // free channels: keyless Bing HTML + Brave HTML
+	// free layer: Exa MCP is keyless and always available — that's the whole layer
+	if (getLayer() === "free") return ["exa-free"];
+	const list: string[] = [];
 	if (env(ENGINE_KEYS.tavily)) list.push("tavily");
 	if (env(ENGINE_KEYS.exa)) list.push("exa");
 	if (env(ENGINE_KEYS.brave)) list.push("brave");
@@ -105,9 +116,12 @@ export function availableEngines(): string[] {
 /**
  * Complexity-aware routing (Keiro/Adaptive-RAG pattern): bind the search budget
  * to the query's complexity instead of paying the max for every query.
- *   simple  -> 1 variant x 2 engines (bing + tavily basic, 1 credit)
- *   medium  -> 2 variants x 3 engines (bing + tavily basic + brave)
- *   complex -> 3 variants x 4 engines (bing + tavily advanced + brave + exa, 2 credits)
+ *   api layer:
+ *     simple  -> 1 variant x 2 engines (tavily basic + brave, 1 credit)
+ *     medium  -> 2 variants x 3 engines (tavily basic + brave + exa)
+ *     complex -> 3 variants x 3 engines (tavily advanced + brave + exa, 2 credits)
+ *   free layer (exa-free keyless, single engine; tiers differ in variants only):
+ *     simple  -> 1 variant, medium -> 2, complex -> 3
  */
 export type Complexity = "simple" | "medium" | "complex";
 
@@ -125,10 +139,19 @@ export function estimateComplexity(query: string): Complexity {
 	return "complex";
 }
 
-const TIER_ENGINES: Record<Complexity, string[]> = {
-	simple: ["bing", "tavily"],
-	medium: ["bing", "tavily", "brave"],
-	complex: ["bing", "tavily", "brave", "exa"],
+const TIER_ENGINES: Record<WebLayer, Record<Complexity, string[]>> = {
+	// api layer: keyed engines only; engines missing their key are dropped at call time
+	api: {
+		simple: ["tavily", "brave"],
+		medium: ["tavily", "brave", "exa"],
+		complex: ["tavily", "brave", "exa"],
+	},
+	// free layer: Exa MCP is the only engine; tiers only vary the variant count
+	free: {
+		simple: ["exa-free"],
+		medium: ["exa-free"],
+		complex: ["exa-free"],
+	},
 };
 
 const TIER_VARIANTS: Record<Complexity, number> = { simple: 1, medium: 2, complex: 3 };
@@ -137,10 +160,10 @@ const TIER_VARIANTS: Record<Complexity, number> = { simple: 1, medium: 2, comple
 
 /**
  * Translate Grok-style queries (site:, -site:, "a" OR "b", quoted phrases)
- * into forms the keyless Bing HTML endpoint can actually use:
- *   - site:/ -site:  -> client-side include/exclude domain filters (Bing ignores these operators)
+ * into engine-agnostic filters + variants:
+ *   - site:/ -site:  -> client-side include/exclude domain filters
  *   - A OR B         -> split into separate query variants
- *   - quotes         -> stripped (Bing HTML mangles quoted queries)
+ *   - quotes         -> stripped (engines treat them inconsistently)
  */
 export interface ParsedQuery {
 	/** query with operators/quotes removed, ready for the engines */
@@ -182,9 +205,7 @@ export function preprocessQuery(raw: string): ParsedQuery {
 	};
 }
 
-/* ---------------------------------- Bing HTML ---------------------------------- */
-
-/** Parse a Bing result date like "2026年8月16日" / "Aug 16, 2026" / "2026-08-16". */
+/** Parse a result date like "2026年8月16日" / "Aug 16, 2026" / "2026-08-16". */
 export function parseDate(raw: string | null | undefined): string | null {
 	if (!raw) return null;
 	const t = raw.trim();
@@ -208,59 +229,6 @@ export function parseDate(raw: string | null | undefined): string | null {
 	m = /(\d{4}-\d{2}-\d{2})/.exec(t);
 	if (m) return m[1];
 	return null;
-}
-
-/** Market for the keyless Bing HTML endpoint. Latin stays en-US (avoids the
- * measured "tokio" → local-pop-culture SERP); Han / kana / hangul follow the query. */
-export function bingMarketForQuery(query: string): { mkt: string; setlang: string; cc: string } {
-	if (/[\u3040-\u30ff]/.test(query)) return { mkt: "ja-JP", setlang: "ja", cc: "JP" };
-	if (/[\uac00-\ud7af]/.test(query)) return { mkt: "ko-KR", setlang: "ko", cc: "KR" };
-	if (/[\u3400-\u9fff]/.test(query)) return { mkt: "zh-CN", setlang: "zh-Hans", cc: "CN" };
-	return { mkt: "en-US", setlang: "en", cc: "US" };
-}
-
-async function searchBingHtml(query: string, count: number): Promise<RawHit[]> {
-	const { mkt, setlang, cc } = bingMarketForQuery(query);
-	const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}&count=${Math.min(count, 20)}&mkt=${mkt}&setlang=${setlang}&cc=${cc}`;
-	const res = await fetchText(url, { timeoutMs: 15000 });
-	if (!res.ok || res.text.length < 200) {
-		throw new Error(`bing http ${res.status}`);
-	}
-	const html = res.text;
-	// structure-change / bot-challenge detection: bing HTML has been stable for
-	// years, but when it changes (or serves a challenge page) the parse yields
-	// nothing while the HTTP status stays 200 — fail loudly instead of silently
-	// returning empty results.
-	if (/challenge-form|anomaly\.js|verify|captcha/i.test(html) && !/<li class="b_algo"/.test(html)) {
-		throw new Error("bing: bot challenge page (structure/anti-bot changed)");
-	}
-	const blockRe = /<li class="b_algo"[\s\S]*?<\/li>/g;
-	const blocks = html.match(blockRe) ?? [];
-	if (blocks.length === 0) {
-		throw new Error("bing: no result blocks parsed (HTML structure changed)");
-	}
-	if (blocks.length < Math.max(2, Math.floor(count / 3))) {
-		// partial parse: possible structure drift; degrade gracefully but flag it
-		throw new Error(`bing: parsed only ${blocks.length}/${count} blocks (possible structure change)`);
-	}
-	const hits: RawHit[] = [];
-	for (const block of blocks) {
-		if (hits.length >= count) break;
-		const anchor = /<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i.exec(block);
-		if (!anchor) continue;
-		const rawHref = anchor[1].replace(/&amp;/g, "&");
-		const url2 = decodeBingUrl(rawHref);
-		if (!/^https?:\/\//i.test(url2)) continue;
-		const title = collapseSpace(decodeHtml(stripTags(anchor[2])));
-		if (!title) continue;
-		const p = /<p[^>]*>([\s\S]*?)<\/p>/i.exec(block);
-		const snippet = p ? collapseSpace(decodeHtml(stripTags(p[1]))) : "";
-		// publish date: bing puts it in <span class="news_dt"> or inline in the snippet
-		const dt = /<span class="news_dt">([^<]*)<\/span>/i.exec(block);
-		const published = dt ? dt[1].trim() : null;
-		hits.push({ title, url: url2, snippet, published });
-	}
-	return hits;
 }
 
 /* ---------------------------------- Tavily ----------------------------------- */
@@ -398,60 +366,153 @@ async function searchBrave(query: string, count: number, o: EngineQueryOptions =
 		}));
 }
 
-/* ---------------------------------- Brave HTML (free, keyless) ---------------------------------- */
+/* ----------------------- Exa MCP Free (keyless, free layer) ----------------------- */
 
-/** Free web-search channel: Brave's public HTML results page (no API key).
- * Used as the second free engine alongside Bing so keyless mode always has
- * two independent channels for cross-checking. Structure-change detection
- * mirrors the Bing adapter: fail loudly, never silently return empty.
- * Note: Brave rate-limits aggressively per IP (measured persistent 429 on
- * datacenter-ish hosts); on 429 we back off for a while instead of hammering. */
-let braveHtmlCooldownUntil = 0;
-async function searchBraveHtml(query: string, count: number): Promise<RawHit[]> {
-	if (Date.now() < braveHtmlCooldownUntil) {
-		throw new Error("bravehtml: rate-limited, cooling down");
+/**
+ * Exa MCP Free — keyless web search via Exa's hosted MCP endpoint
+ * (https://mcp.exa.ai/mcp, `web_search_exa` tool). This is the free layer's
+ * only engine. One search = one MCP session (initialize → initialized →
+ * tools/call), then parse the returned markdown into RawHits.
+ *
+ * Fragile to Exa's output format and subject to IP-level 429 — on failure we
+ * fail loudly (never silently empty). Consumers should surface the 429 hint
+ * so the user can `/web_change api`.
+ */
+const EXA_MCP_URL = "https://mcp.exa.ai/mcp";
+const EXA_MCP_PROTOCOL = "2025-03-26";
+const EXA_MCP_TIMEOUT_MS = 25_000;
+
+interface JsonRpcResponse {
+	jsonrpc?: string;
+	id?: number;
+	result?: { content?: Array<{ type?: string; text?: string }>; [k: string]: unknown };
+	error?: { code?: number; message?: string };
+}
+
+let exaMcpNextId = 1;
+
+async function exaMcpPost(
+	body: Record<string, unknown>,
+	sessionId: string | undefined,
+	signal?: AbortSignal,
+): Promise<{ json: JsonRpcResponse; sessionId?: string }> {
+	const headers: Record<string, string> = {
+		"Content-Type": "application/json",
+		Accept: "application/json, text/event-stream",
+	};
+	if (sessionId) headers["Mcp-Session-Id"] = sessionId;
+	const timeout = AbortSignal.timeout(EXA_MCP_TIMEOUT_MS);
+	const resp = await fetch(EXA_MCP_URL, {
+		method: "POST",
+		headers,
+		body: JSON.stringify(body),
+		signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+	});
+	if (!resp.ok) {
+		if (resp.status === 429) {
+			throw new Error("exa-free: rate-limited (429) — run /web_change api or wait a moment and retry");
+		}
+		throw new Error(`exa-free: MCP http ${resp.status}`);
 	}
-	const url = `https://search.brave.com/search?q=${encodeURIComponent(query)}&source=web`;
-	// curl UA: Brave rate-limits browser-like UAs harder (measured 429 on Chrome
-	// UA, 200 on curl UA); the same trick that keeps Jina working
-	const res = await fetchText(url, { timeoutMs: 15000, headers: { "User-Agent": "curl/8.5.0" } });
-	if (!res.ok || res.text.length < 500) {
-		if (res.status === 429) braveHtmlCooldownUntil = Date.now() + 60_000;
-		throw new Error(`bravehtml http ${res.status}`);
+	const newSession = resp.headers.get("mcp-session-id") ?? sessionId;
+	const ctype = resp.headers.get("content-type") ?? "";
+	const raw = await resp.text();
+	// notifications (no `id`) are answered with 202 + empty body — nothing to parse
+	const isNotification = body.id === undefined;
+	if (!raw.trim()) {
+		if (isNotification) return { json: {}, sessionId: newSession };
+		throw new Error("exa-free: empty response body");
 	}
-	const html = res.text;
-	if (!/data-pos="\d+"[^>]*data-type="web"/.test(html)) {
-		throw new Error("bravehtml: no result blocks parsed (structure changed / challenge page)");
+	let payload: string | null = null;
+	// SSE transport: the last `data:` line carries the JSON-RPC message
+	if (ctype.includes("text/event-stream") || raw.includes("\ndata: ")) {
+		const dataLines = raw.split("\n").filter((l) => l.startsWith("data: ")).map((l) => l.slice(6));
+		payload = dataLines[dataLines.length - 1] ?? null;
+	} else {
+		payload = raw;
 	}
+	if (!payload) {
+		if (isNotification) return { json: {}, sessionId: newSession };
+		throw new Error("exa-free: empty SSE response");
+	}
+	let parsed: JsonRpcResponse;
+	try {
+		parsed = JSON.parse(payload) as JsonRpcResponse;
+	} catch {
+		if (isNotification) return { json: {}, sessionId: newSession };
+		throw new Error("exa-free: response body not JSON");
+	}
+	if (parsed.error) throw new Error(`exa-free: MCP error ${parsed.error.code ?? "?"} ${parsed.error.message ?? ""}`.slice(0, 80));
+	return { json: parsed, sessionId: newSession };
+}
+
+/** Parse Exa MCP markdown output ("Title:/URL:/Highlights:" blocks, then markdown links). */
+function parseExaFreeText(text: string): RawHit[] {
 	const hits: RawHit[] = [];
-	// one block per web result card, cut at the next card
-	const blockRe = /data-pos="\d+"[^>]*data-type="web"[\s\S]*?(?=data-pos="\d+"|$)/g;
-	for (const m of html.matchAll(blockRe)) {
-		if (hits.length >= count) break;
-		const block = m[0];
-		const anchor = /<a href="(https?:\/\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/i.exec(block);
-		if (!anchor) continue;
-		const url2 = anchor[1].replace(/&amp;/g, "&");
-		if (/^(imgs|cdn|search)\.search\.brave\.com|brave\.com\//.test(url2)) continue;
-		const title = collapseSpace(decodeHtml(stripTags(anchor[2])));
-		if (!title || title.length < 3) continue;
-		// description = block text after the title link (skips site-name/chrome)
-		let snippet = collapseSpace(decodeHtml(stripTags(block.slice(anchor[0].length))));
-		if (snippet.length > 260) snippet = snippet.slice(0, 260);
-		hits.push({ title, url: url2, snippet });
+	for (const block of text.split(/\n---+\n/)) {
+		const title = block.match(/^Title:\s*(.+)$/m)?.[1]?.trim();
+		const url = block.match(/^URL:\s*(https?:\/\/\S+)$/m)?.[1]?.trim();
+		if (!title || !url) continue;
+		const hi = block.search(/^Highlights:\s*/m);
+		const snippet =
+			hi >= 0 ? block.slice(hi).replace(/^Highlights:\s*/m, "").replace(/\s+/g, " ").trim().slice(0, 240) : "";
+		hits.push({ title, url, snippet });
 	}
-	if (hits.length === 0) throw new Error("bravehtml: parsed 0 results (structure changed)");
+	if (hits.length > 0) return hits;
+	// fallback: markdown links [Title](URL)
+	for (const m of text.matchAll(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g)) {
+		hits.push({ title: m[1]!.trim().slice(0, 120), url: m[2]!.trim(), snippet: "" });
+	}
 	return hits;
+}
+
+async function searchExaFree(query: string, count: number): Promise<RawHit[]> {
+	// 1) initialize (gets the MCP session id)
+	const init = await exaMcpPost(
+		{
+			jsonrpc: "2.0",
+			id: exaMcpNextId++,
+			method: "initialize",
+			params: {
+				protocolVersion: EXA_MCP_PROTOCOL,
+				capabilities: {},
+				clientInfo: { name: "pi-search-boost", version: "1.0.0" },
+			},
+		},
+		undefined,
+	);
+	if (!init.sessionId) throw new Error("exa-free: no MCP session id (initialize failed)");
+	// 2) initialized notification (fire-and-forget; non-fatal)
+	try {
+		await exaMcpPost({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }, init.sessionId);
+	} catch {
+		/* notification failure is not fatal */
+	}
+	// 3) tools/call: web_search_exa
+	const call = await exaMcpPost(
+		{
+			jsonrpc: "2.0",
+			id: exaMcpNextId++,
+			method: "tools/call",
+			params: { name: "web_search_exa", arguments: { query, numResults: Math.min(count, 10) } },
+		},
+		init.sessionId,
+	);
+	const text = (call.json.result?.content ?? [])
+		.filter((c) => c?.type === "text")
+		.map((c) => c.text ?? "")
+		.join("\n");
+	if (!text.trim()) return [];
+	return parseExaFreeText(text).slice(0, count);
 }
 
 /* --------------------------------- Engine map --------------------------------- */
 
 const ENGINE_FNS: Record<string, (q: string, n: number, o?: EngineQueryOptions) => Promise<RawHit[]>> = {
-	bing: searchBingHtml,
-	bravehtml: searchBraveHtml,
 	tavily: searchTavily,
 	exa: searchExa,
 	brave: searchBrave,
+	"exa-free": searchExaFree,
 };
 
 /* ------------------------------ Query expansion ------------------------------ */
@@ -529,7 +590,7 @@ const SCORE_PARAMS = {
 	domainHardCap: 5,
 };
 
-const ENGINE_WEIGHT: Record<string, number> = { bing: 1.0, bravehtml: 1.0, tavily: 1.2, exa: 1.2, brave: 1.1 };
+const ENGINE_WEIGHT: Record<string, number> = { tavily: 1.2, exa: 1.2, brave: 1.1, "exa-free": 1.0 };
 
 function domainBonus(domain: string): number {
 	if (AUTHORITATIVE_TLDS.some((t) => domain.endsWith(t))) return SCORE_PARAMS.authoritativeBonus;
@@ -550,7 +611,7 @@ export interface FusedOptions {
 	maxPerEngine?: number;
 	/** max results per domain in the fused output (default 2) */
 	maxPerDomain?: number;
-	/** only keep results from these domains (Bing ignores site: operators, so this is a hard client-side filter) */
+	/** only keep results from these domains (hard client-side filter; also passed natively to APIs) */
 	includeDomains?: string[];
 	/** drop results from these domains (hard client-side filter) */
 	excludeDomains?: string[];
@@ -569,14 +630,14 @@ export interface FusedOptions {
 	progress?: (msg: string) => void;
 }
 
-/** Engines that scrape a results page and therefore ignore query options. */
-const HTML_ENGINES = ["bing", "bravehtml"];
+/** Engines whose answers ignore query options (recency/depth/domain filters)
+ * and therefore get unfragmented cache keys. */
+const OPTIONLESS_ENGINES = new Set(["exa-free"]);
 
 /**
  * Cache key for one engine's answer to one query.
  * Must cover everything that changes that answer: recency, depth, domain
- * filters, and result count. HTML scrapers ignore those options, so their
- * keys stay unfragmented.
+ * filters, and result count.
  */
 export function searchCacheKey(
 	engine: string,
@@ -585,7 +646,7 @@ export function searchCacheKey(
 	o: EngineQueryOptions,
 ): string {
 	const parts = [`n${count}`];
-	if (!HTML_ENGINES.includes(engine)) {
+	if (!OPTIONLESS_ENGINES.has(engine)) {
 		if (o.recency) parts.push(`r:${o.recency}`);
 		if (engine === "tavily" && o.depth) parts.push(`d:${o.depth}`);
 		if (o.includeDomains?.length) parts.push(`i:${[...o.includeDomains].sort().join(",")}`);
@@ -600,15 +661,31 @@ export async function fusedSearch(opts: FusedOptions): Promise<FusedResult> {
 	const tier: Complexity = opts.complexity === "auto" || !opts.complexity
 		? estimateComplexity(opts.query)
 		: opts.complexity;
-	// engine set per tier: only keyed engines that are actually configured are kept
+	// active layer (free | api) decides which engine set the tier maps to
+	const layer = getLayer();
 	const available = availableEngines();
-	const engines = (opts.engines ?? TIER_ENGINES[tier]).filter(
+	const warnings: string[] = [];
+	const requested = opts.engines ?? TIER_ENGINES[layer][tier];
+	const engines = requested.filter(
 		(e) => ENGINE_FNS[e] && available.includes(e),
 	);
-	// free-mode fill: with no API keys the tier filter leaves only Bing; add the
-	// free Brave-HTML channel so keyless mode always has two independent engines
-	// for cross-checking (and Bing failures never mean zero results).
-	if (engines.length < 2 && available.includes("bravehtml")) engines.push("bravehtml");
+	// A caller-supplied engine list can come out empty (e.g. retired names, or
+	// engines not available in the active layer). Fall back to this layer's
+	// tier engines so a free-layer call never silently returns a dead pool.
+	if (engines.length === 0) {
+		for (const e of TIER_ENGINES[layer][tier]) {
+			if (ENGINE_FNS[e] && available.includes(e) && !engines.includes(e)) engines.push(e);
+		}
+	}
+	// last resort: the api layer with zero configured keys would return nothing
+	// at all — degrade to the keyless exa-free engine and say so, loudly.
+	if (engines.length === 0 && ENGINE_FNS["exa-free"]) {
+		engines.push("exa-free");
+		warnings.push(
+			`layer "${layer}" has no available engines (no API keys configured?) — fell back to keyless exa-free for this query`,
+		);
+		opts.progress?.(warnings[0]!);
+	}
 	// depth: advanced only pays 2x credits when content will actually be consumed
 	const depth = opts.depth ?? (tier === "complex" ? "advanced" : "basic");
 	const cache = opts.cache;
@@ -630,8 +707,8 @@ export async function fusedSearch(opts: FusedOptions): Promise<FusedResult> {
 	].filter(Boolean))].slice(0, TIER_VARIANTS[tier] + (includeDomains.length > 0 ? 2 : 0));
 	// guard: a degenerate query (all punctuation/operators) must still search
 	if (queries.length === 0) queries.push(opts.query);
-	// include-domain queries: bing ignores site:, so each include domain gets its
-	// own parallel query pass and the results are client-filtered below.
+	// include-domain queries: APIs get native filters; also add a query pass
+	// mentioning the domain so snippet-level ranking still sees it.
 	const effectiveQueries = includeDomains.length > 0
 		? [...new Set([...queries, ...includeDomains.map((d) => `${opts.query} ${d}`)])].slice(0, 6)
 		: queries;
@@ -708,7 +785,7 @@ export async function fusedSearch(opts: FusedOptions): Promise<FusedResult> {
 			if (!norm.startsWith("http")) return;
 			const domain = hostOf(norm);
 			if (!domain) return;
-			// hard filters (client-side; bing ignores site:/-site: operators)
+			// hard filters (client-side backup for engines that ignore site:)
 			if (excludeDomains.some((d) => domainMatches(domain, d))) return;
 			if (includeDomains.length > 0 && !includeDomains.some((d) => domainMatches(domain, d))) return;
 			const existing = merged.get(norm);
@@ -817,6 +894,8 @@ export async function fusedSearch(opts: FusedOptions): Promise<FusedResult> {
 		tookMs: Date.now() - started,
 		filters: { includeDomains, excludeDomains, recency: opts.recency },
 		tier,
+		layer,
+		warnings,
 	};
 }
 
