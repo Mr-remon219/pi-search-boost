@@ -356,6 +356,8 @@ During coding / development work, search BEFORE you write — never write code a
 		parameters: Type.Object({
 			query: Type.String({ description: "The overall research question" }),
 			subtasks: Type.Array(Type.String(), {
+				minItems: 2,
+				maxItems: 4,
 				description: "2-4 well-separated subtasks; each runs as an independent agent",
 			}),
 			max_parallel: Type.Optional(Type.Integer({ minimum: 1, maximum: 4, default: 2, description: "Concurrent subtask agents (default 2; 3-4 is faster but hits search rate limits sooner)" })),
@@ -364,6 +366,9 @@ During coding / development work, search BEFORE you write — never write code a
 		}),
 		async execute(toolCallId, params, signal, onUpdate) {
 			const progress = onProgress(toolCallId, onUpdate);
+			if (params.subtasks.length < 2) {
+				throw new Error("research_parallel requires at least 2 subtasks (pass 2-4 well-separated angles)");
+			}
 			const started = Date.now();
 			const res = await runParallelResearch({
 				query: params.query,
@@ -714,6 +719,28 @@ During coding / development work, search BEFORE you write — never write code a
 			const started = Date.now();
 			const kind = params.type as XSearchType;
 			const subj = kind === "thread" ? params.post_id : params.query ?? params.username;
+			const renderItems = (items: unknown[]): string =>
+				items
+					.map((item) => {
+						const it = item as Record<string, unknown>;
+						if (Array.isArray(it.recent_posts)) {
+							const posts = (it.recent_posts as Array<Record<string, unknown>>).slice(0, 3);
+							return `${it.name} (@${it.username}) — followers ${it.followers ?? "?"}, verified ${it.verified ?? false}\n  bio: ${it.bio ?? ""}\n  recent: ${posts.map((p) => `${p.text}`.slice(0, 80)).join(" | ") || "(none)"}`;
+						}
+						return `${it.author ? it.author + (it.username ? ` (@${it.username})` : "") + ": " : ""}${it.text || it.url}`;
+					})
+					.join("\n");
+			const normalizeXItems = (data: unknown): unknown[] => {
+				if (Array.isArray(data)) return data;
+				if (data && typeof data === "object") return [data];
+				return [];
+			};
+			if (params.allowed_x_handles?.length && params.excluded_x_handles?.length) {
+				return {
+					content: [{ type: "text", text: "x_search failed: allowed_x_handles and excluded_x_handles are mutually exclusive — pass only one" }],
+					details: { error: "mutually_exclusive_handles" },
+				};
+			}
 			const cacheKey = ["xsearch", kind, subj ?? "", params.from_date ?? "", params.to_date ?? "", (params.allowed_x_handles ?? []).join(","), (params.excluded_x_handles ?? []).join(",")].join("|");
 			const ttl = kind === "thread" ? 900 : kind === "user" ? 600 : 300;
 			const cached = cache.get<unknown>(cacheKey);
@@ -729,9 +756,13 @@ During coding / development work, search BEFORE you write — never write code a
 			};
 			if (cached) {
 				evt.tookMs = Date.now() - started;
-				evt.results = Array.isArray(cached) ? cached.length : 1;
+				const items = normalizeXItems(cached);
+				evt.results = items.length || 1;
 				audit.write(evt);
-				return { content: [{ type: "text", text: `X search: ${kind} "${subj}" — CACHE HIT (${evt.tookMs}ms)\n\n${JSON.stringify(cached)}` }], details: { cacheHit: true, tookMs: evt.tookMs } };
+				return {
+					content: [{ type: "text", text: `X search: ${kind} "${subj}" — CACHE HIT (${evt.tookMs}ms)\n\n${renderItems(items)}` }],
+					details: { cacheHit: true, tookMs: evt.tookMs },
+				};
 			}
 			if (!subj) {
 				evt.error = kind === "thread" ? "post_id required" : "query or username required";
@@ -753,17 +784,6 @@ During coding / development work, search BEFORE you write — never write code a
 					});
 					return r.results.map((h) => ({ title: h.title, url: h.url, snippet: h.snippet, domain: h.domain }));
 				};
-				const renderItems = (items: unknown[]): string =>
-					items
-						.map((item) => {
-							const it = item as Record<string, unknown>;
-							if (Array.isArray(it.recent_posts)) {
-								const posts = (it.recent_posts as Array<Record<string, unknown>>).slice(0, 3);
-								return `${it.name} (@${it.username}) — followers ${it.followers ?? "?"}, verified ${it.verified ?? false}\n  bio: ${it.bio ?? ""}\n  recent: ${posts.map((p) => `${p.text}`.slice(0, 80)).join(" | ") || "(none)"}`;
-							}
-							return `${it.author ? it.author + (it.username ? ` (@${it.username})` : "") + ": " : ""}${it.text || it.url}`;
-						})
-						.join("\n");
 				const renderFallback = async (
 					primaryErr: string,
 				): Promise<{ content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> }> => {
@@ -825,7 +845,7 @@ During coding / development work, search BEFORE you write — never write code a
 						engineSearch(engQuery, 5),
 					]);
 					if (xOutcome.status === "fulfilled") {
-						const xPosts = Array.isArray(xOutcome.value.data) ? (xOutcome.value.data as Array<Record<string, unknown>>) : [];
+						const xPosts = normalizeXItems(xOutcome.value.data) as Array<Record<string, unknown>>;
 						// 引擎结果补充（按 id/url 去重，x 结果优先）
 						const extra =
 							engOutcome.status === "fulfilled"
@@ -871,15 +891,21 @@ During coding / development work, search BEFORE you write — never write code a
 					});
 					cache.set(cacheKey, res.data, ttl);
 					evt.tookMs = Date.now() - started;
-					evt.results = Array.isArray(res.data) ? res.data.length : typeof res.data === "object" && res.data !== null ? 1 : 0;
+					const items = normalizeXItems(res.data);
+					evt.results = items.length || (typeof res.data === "string" && res.data ? 1 : 0);
 					evt.credential = res.credential;
 					audit.write(evt);
-					const payload = typeof res.data === "string" ? res.data : JSON.stringify(res.data, null, 2);
+					const body =
+						items.length > 0
+							? renderItems(items)
+							: typeof res.data === "string"
+								? res.data
+								: JSON.stringify(res.data, null, 2);
 					return {
 						content: [
 							{
 								type: "text",
-								text: `X search: ${res.type} "${subj}" — ${evt.results} result(s) in ${res.tookMs}ms via ${res.credential} (cached ${ttl}s)\n\n${payload.slice(0, 100_000)}`,
+								text: `X search: ${res.type} "${subj}" — ${evt.results} result(s) in ${res.tookMs}ms via ${res.credential} (cached ${ttl}s)\n\n${body.slice(0, 100_000)}`,
 							},
 						],
 						details: { results: evt.results, tookMs: res.tookMs, credential: res.credential },
@@ -918,7 +944,11 @@ During coding / development work, search BEFORE you write — never write code a
 					return;
 				}
 				if (cmd.startsWith("-k ") || cmd.startsWith("--key ")) {
-					const key = cmd.split(/\s+/)[1] ?? "";
+					const key = cmd.replace(/^(-k|--key)\s+/, "").trim();
+					if (!key) {
+						ctx.ui.notify("x-login: missing API key after -k / --key", "error");
+						return;
+					}
 					importApiKey(key);
 					ctx.ui.notify(`x-login: API key saved → ${piAuthPath()} (public api.x.ai will be used for x_search)`, "info");
 					return;

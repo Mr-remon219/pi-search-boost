@@ -6,11 +6,13 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 
 import { JsonCache } from "../lib/cache.ts";
 import {
 	applyBraveSiteFilters,
+	domainBonus,
 	estimateComplexity,
 	expandQueries,
 	parseDate,
@@ -20,6 +22,7 @@ import {
 import { excerptForTool, pickExcerpts, pickParagraphs } from "../lib/extract.ts";
 import { getLayer, setLayer } from "../lib/layer.ts";
 import { plannedResearchRounds } from "../lib/research.ts";
+import { extractJsonPayload } from "../lib/xsearch.ts";
 import {
 	assertPublicHttpUrl,
 	countWords,
@@ -334,5 +337,29 @@ describe("JsonCache", () => {
 		c.clear();
 		c.flush();
 		assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), {});
+	});
+});
+
+describe("domain scoring for site-restricted search", () => {
+	it("does not junk-penalize x.com when it is explicitly included", () => {
+		const junked = domainBonus("x.com");
+		const included = domainBonus("x.com", ["x.com"]);
+		assert.ok(junked < 0, `expected junk penalty, got ${junked}`);
+		assert.equal(included, 0, "explicit include should skip junk penalty");
+	});
+});
+
+describe("x_search JSON extraction", () => {
+	it("strips markdown code fences before parsing", () => {
+		const raw = '```json\n[{"id":"1","text":"hi"}]\n```';
+		assert.equal(extractJsonPayload(raw), '[{"id":"1","text":"hi"}]');
+		assert.deepEqual(JSON.parse(extractJsonPayload(raw)), [{ id: "1", text: "hi" }]);
+	});
+});
+
+describe("research_parallel extension path", () => {
+	it("resolves index.ts next to the package root (npm / manual / git)", () => {
+		const ext = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "index.ts");
+		assert.ok(fs.existsSync(ext), `expected extension entry at ${ext}`);
 	});
 });
