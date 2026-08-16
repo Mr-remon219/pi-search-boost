@@ -154,12 +154,25 @@ export function buildPrompt(params: XSearchParams): string {
 }
 
 function buildToolConfig(params: XSearchParams): Record<string, unknown> {
+	if (params.allowed_x_handles?.length && params.excluded_x_handles?.length) {
+		throw new Error("allowed_x_handles and excluded_x_handles are mutually exclusive");
+	}
 	const cfg: Record<string, unknown> = { type: "x_search" };
 	if (params.allowed_x_handles?.length) cfg.allowed_x_handles = params.allowed_x_handles.slice(0, 20);
 	if (params.excluded_x_handles?.length) cfg.excluded_x_handles = params.excluded_x_handles.slice(0, 20);
 	if (params.from_date) cfg.from_date = params.from_date;
 	if (params.to_date) cfg.to_date = params.to_date;
 	return cfg;
+}
+
+/** Strip optional markdown fences the model may wrap around JSON output. */
+export function extractJsonPayload(raw: string): string {
+	const trimmed = raw.trim();
+	const fenced = /^```(?:json)?\s*([\s\S]*?)```\s*$/i.exec(trimmed);
+	if (fenced) return fenced[1]!.trim();
+	const inline = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
+	if (inline) return inline[1]!.trim();
+	return trimmed;
 }
 
 function parseFinalMessage(response: unknown): { raw: string; data: unknown } {
@@ -174,8 +187,9 @@ function parseFinalMessage(response: unknown): { raw: string; data: unknown } {
 		}
 	}
 	const raw = text.trim();
+	const payload = extractJsonPayload(raw);
 	try {
-		return { raw, data: JSON.parse(raw) };
+		return { raw, data: JSON.parse(payload) };
 	} catch {
 		return { raw, data: raw };
 	}
@@ -211,11 +225,13 @@ export async function runXTool(params: XSearchParams): Promise<XSearchResult> {
 		stream: false,
 	};
 
+	const timeout = AbortSignal.timeout(timeoutMs);
+	const signal = params.signal ? AbortSignal.any([params.signal, timeout]) : timeout;
 	const res = await fetch(`${creds.baseUrl}/responses`, {
 		method: "POST",
 		headers: { "content-type": "application/json", ...creds.headers },
 		body: JSON.stringify(body),
-		signal: params.signal ?? AbortSignal.timeout(timeoutMs),
+		signal,
 	});
 	const tookMs = Date.now() - started;
 	if (!res.ok) {

@@ -96,8 +96,7 @@ export class AuditLog {
 				this.bytes = 0;
 			}
 			fs.mkdirSync(path.dirname(this.file), { recursive: true });
-			// async write: never block the tool's hot path
-			void fs.promises.appendFile(this.file, line, "utf8").catch(() => {});
+			fs.appendFileSync(this.file, line, "utf8");
 			this.bytes += line.length;
 		} catch {
 			/* audit must never break search */

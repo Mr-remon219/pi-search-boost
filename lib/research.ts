@@ -89,7 +89,7 @@ export async function runResearch(opts: ResearchOptions): Promise<ResearchResult
 	const mode = opts.mode ?? "auto";
 	const maxRounds = plannedResearchRounds(mode, opts.maxRounds);
 	const maxSources = Math.min(15, Math.max(1, opts.maxSources ?? 8));
-	const perRound = Math.min(6, Math.max(2, opts.perRound ?? 3));
+	const perRound = Math.min(6, Math.max(2, opts.perRound ?? 4));
 	const engines = opts.engines;
 	const cache = opts.cache;
 	const progress = opts.progress ?? (() => {});
