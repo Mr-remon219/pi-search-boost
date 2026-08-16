@@ -4,6 +4,7 @@ Initial release. Turns pi's web search into a research-grade capability: fused m
 
 ### Features
 
+- **Distributed as a pi package** — `pi install git:github.com/Mr-remon219/pi-search-boost` (or clone + `pi install .`); `pi.extensions` manifest in `package.json`
 - **`fused_search`** — 5-engine parallel search (Bing + Brave HTML keyless, Tavily, Exa, Brave), URL dedupe, cross-engine scoring, engine provenance per result; keyless mode keeps two independent free channels for cross-checking
 - **Complexity routing** — `simple` (1×2 engines, 1 credit) / `medium` (2×3) / `complex` (3×4 + advanced extraction, 2 credits); simple lookups stop costing like deep research
 - **`fetch_page` with `focus`** — dynamic filtering keeps only query-relevant paragraphs: **95% token savings** (1136 → 61 words measured); Jina Reader → local extractor → headless-browser fallback chain
@@ -25,14 +26,17 @@ Initial release. Turns pi's web search into a research-grade capability: fused m
 | Focus filtering | 95% token savings |
 | research_parallel (3 subtasks) | ~65s (vs ~160s serial) |
 
-### Install
+### Install (pi-driven)
 
 ```bash
-# Windows
-install.bat
-# macOS / Linux
-chmod +x install.sh && ./install.sh
+# one-command install from git (recommended)
+pi install git:github.com/Mr-remon219/pi-search-boost
+
+# optional companion: web_search / web_fetch
+pi install npm:@bytetrue/pi-web-search
 ```
+
+Or clone and `pi install .`; manual fallback: `install.bat` / `install.sh`. Full guide: [README.md](README.md).
 
 Optional API keys: Tavily (1000 free credits/mo), Exa, Brave — keyless mode (Bing + Brave HTML + Jina) works without any.
 
