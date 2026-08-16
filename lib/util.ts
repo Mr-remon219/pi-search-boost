@@ -223,31 +223,6 @@ export function domainMatches(domain: string, pattern: string): boolean {
 	return d === p || d.endsWith(`.${p}`);
 }
 
-export function decodeBingUrl(href: string): string {
-	// Bing ck/a redirect URLs carry the real URL base64url-encoded in u=,
-	// with a variable-length prefix (empirically "a1" or "a1a"). Try decoding
-	// with 0/2/3-char prefixes and accept the first http(s) result.
-	try {
-		const u = new URL(href);
-		const enc = u.searchParams.get("u");
-		if (enc) {
-			for (const skip of [0, 2, 3]) {
-				let b64 = enc.slice(skip).replace(/-/g, "+").replace(/_/g, "/");
-				while (b64.length % 4 !== 0) b64 += "=";
-				try {
-					const decoded = Buffer.from(b64, "base64").toString("utf8");
-					if (decoded.startsWith("http")) return decoded;
-				} catch {
-					/* try next prefix */
-				}
-			}
-		}
-	} catch {
-		/* fall through */
-	}
-	return href;
-}
-
 /** Run async tasks with bounded concurrency. */
 export async function pool<T, R>(
 	items: T[],

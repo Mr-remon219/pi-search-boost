@@ -1,6 +1,6 @@
 {
   "name": "pi-search-boost",
-  "version": "0.1.0",
+  "version": "0.0.2",
   "description": "Multi-engine research-grade web search for pi: fused retrieval, deep research loops, parallel subagents, focus-filtered page reading, caching, and auditability.",
   "type": "module",
   "keywords": [
@@ -22,6 +22,8 @@
     "typebox": "*"
   },
   "pi": {
-    "extensions": ["./index.ts"]
+    "extensions": [
+      "./index.ts"
+    ]
   }
 }

@@ -19,10 +19,10 @@ pi -ne -e /workspace/index.ts -p "fused_search 'tokio latest version'"
 Without a key, pi loads the extension and registers all tools, then fails only at the LLM call with an API-key error — that error still confirms the extension itself loaded cleanly.
 
 ### Testing the core WITHOUT an LLM key (fast, no key required)
-The value of this repo lives in `lib/` and is LLM-free. `fused_search`, `fetch_page`, and `deep_research` can be exercised directly against the live web (keyless mode = Bing HTML + Brave HTML + Jina Reader; no API keys needed). `lib/engines.ts`, `lib/extract.ts`, `lib/research.ts`, `lib/cache.ts`, and `lib/util.ts` import only each other + node built-ins, so a tiny harness that imports them runs under node type-stripping:
+The value of this repo lives in `lib/` and is LLM-free. `fused_search`, `fetch_page`, and `deep_research` can be exercised directly against the live web (free layer = keyless Exa MCP + Jina Reader, no API keys needed; api layer = Tavily/Brave/Exa keys — switch with `/web_change`). `lib/engines.ts`, `lib/extract.ts`, `lib/research.ts`, `lib/cache.ts`, and `lib/util.ts` import only each other + node built-ins, so a tiny harness that imports them runs under node type-stripping:
 ```bash
 node --experimental-strip-types your_harness.ts   # import { fusedSearch } from "/workspace/lib/engines.ts"
 ```
 Only `research_parallel` (spawns `pi` subprocesses) and the `index.ts` registration layer require the `pi` deps.
 
-Optional search API keys (all optional; keyless mode works without them): `PI_SEARCH_TAVILY_KEY`, `PI_SEARCH_EXA_KEY`, `PI_SEARCH_BRAVE_KEY` — see `.env.example`.
+Search API keys (needed for the api layer only; the free layer needs none): `PI_SEARCH_TAVILY_KEY`, `PI_SEARCH_EXA_KEY`, `PI_SEARCH_BRAVE_KEY` — see `.env.example`.
