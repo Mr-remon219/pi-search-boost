@@ -125,6 +125,7 @@ pi remove git:github.com/Mr-remon219/pi-search-boost
 | `fetch_page` | Reader 模式抓页：Jina Reader（免 key）→ 本地启发式抽取兜底 → 薄页面走无头浏览器。`focus` 参数只保留相关段落（省 80-95% token） |
 | `deep_research` | 多轮循环：覆盖度检查、逐来源佐证、一手来源优先、时效性。`mode=step` 返回缺口与建议查询，供 agent 亲自驱动迭代 |
 | `research_parallel` | 2-4 个独立子代理（pi 子进程）各自带搜索预算，并行跑，最后交叉验证汇总 |
+| `x_search` | X/Twitter 实时搜索（帖子/用户/线程）。keyword/semantic 双通道并行：托管 x_search 工具（grok 登录 / `XAI_API_KEY`）∥ 融合多引擎（限 x.com），结果去重合并；无凭据也可用（多引擎 + oEmbed 全文增强；用户结构化资料走 guest GraphQL） |
 
 ### fused_search 参数
 
@@ -148,6 +149,7 @@ pi remove git:github.com/Mr-remon219/pi-search-boost
 
 - `/search-audit stats|recent|failures|domains|clear` — 分析审计日志：事件计数、抓取成功率、引擎错误、层级分布、Tavily credits 估算、失败域名
 - `/search-cache stats|clear` — 查看或清空缓存
+- `/x-login [|-k <XAI_API_KEY>|status]` — 把 xAI 凭据导入 pi 自己的目录供 x_search 使用（无参 = 从你的 grok 登录导入；`-k` = API key；`status` = 查看凭据链）
 
 ---
 

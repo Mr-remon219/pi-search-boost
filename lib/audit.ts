@@ -30,7 +30,7 @@ export interface AuditFetchEvent {
 	ts: string;
 	url: string;
 	domain: string;
-	via: "jina" | "local" | "cache" | "jina-browser" | "failed";
+	via: "jina" | "local" | "cache" | "jina-browser" | "failed" | "search";
 	ok: boolean;
 	error?: string;
 	status?: number;
@@ -55,7 +55,20 @@ export interface AuditResearchEvent {
 	tookMs: number;
 }
 
-export type AuditEvent = AuditSearchEvent | AuditFetchEvent | AuditResearchEvent;
+export interface AuditXSearchEvent {
+	type: "xsearch";
+	ts: string;
+	subtype: string;
+	query?: string;
+	postId?: string;
+	results: number;
+	cacheHit: boolean;
+	credential?: string;
+	error?: string;
+	tookMs: number;
+}
+
+export type AuditEvent = AuditSearchEvent | AuditFetchEvent | AuditResearchEvent | AuditXSearchEvent;
 
 export class AuditLog {
 	private readonly file: string;

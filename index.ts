@@ -21,12 +21,15 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 
 import { JsonCache } from "./lib/cache.ts";
-import { AuditLog, type AuditFetchEvent } from "./lib/audit.ts";
+import { AuditLog, type AuditFetchEvent, type AuditXSearchEvent } from "./lib/audit.ts";
 import { availableEngines, fusedSearch } from "./lib/engines.ts";
 import { excerptForTool, fetchPage } from "./lib/extract.ts";
 import { LAYER_LABELS, getLayer, setLayer } from "./lib/layer.ts";
 import { runResearch } from "./lib/research.ts";
 import { runParallelResearch } from "./lib/parallel.ts";
+import { runXTool, xAuthAvailableSync, type XSearchType } from "./lib/xsearch.ts";
+import { fallbackXSearch, hitToPost } from "./lib/xfallback.ts";
+import { authStatus, importFromGrok, importApiKey, jwtTier, piAuthPath, tierName } from "./lib/xauth.ts";
 import { countWords, hostOf } from "./lib/util.ts";
 
 export default function searchBoostExtension(pi: ExtensionAPI) {
@@ -64,6 +67,7 @@ Depth by stakes:
 Tool routing (single source of truth):
 - Single-point lookup: one fused_search (simple tier) — no ceremony
 - Need a page's content: fetch_page, with focus when you only need part of it
+- X/Twitter data (posts, trends, sentiment, accounts, threads): x_search — it runs x_search ∥ multi-engine in parallel and merges; works with or without credentials
 - Multi-angle / comparison / research: fused_search with variants; deep_research for a single deep dive; research_parallel for separable angles
 - Local files/code can answer it: no search at all
 
@@ -563,6 +567,9 @@ During coding / development work, search BEFORE you write — never write code a
 					if (e.type === "fetch") {
 						return `[${e.ts.slice(11, 19)}] fetch ${e.ok ? "ok" : "FAIL"} ${e.via} ${e.domain}${e.ok ? ` (${e.wordCount} words, ${e.tookMs}ms)` : `: ${e.error}`}`;
 					}
+					if (e.type === "xsearch") {
+						return `[${e.ts.slice(11, 19)}] x_search ${e.subtype} "${(e.query ?? e.postId ?? "").slice(0, 60)}" -> ${e.results} results${e.error ? ` ERROR: ${e.error.slice(0, 80)}` : ""}, ${e.tookMs}ms${e.cacheHit ? " (cache)" : ""}`;
+					}
 					return `[${e.ts.slice(11, 19)}] research "${e.query.slice(0, 60)}" ${e.rounds}r ${e.stopReason} ${e.sources}s/${e.domains}d ${e.tookMs}ms`;
 				});
 				ctx.ui.notify(`search-boost audit (last ${recent.length}):\n${lines.join("\n")}`, "info");
@@ -669,6 +676,257 @@ During coding / development work, search BEFORE you write — never write code a
 				].join("\n"),
 				"info",
 			);
+		},
+	});
+
+	/* ------------------------------ x_search: X/Twitter via direct API ------------------------------ */
+	// pi 自己发起：读 grok 登录态（或 XAI_API_KEY），直连 Responses API + hosted x_search 工具，
+	// 不启动任何 grok 子进程。模型调用服务端执行，结果以结构化 JSON 返回。
+
+	pi.registerTool({
+		name: "x_search",
+		label: "X (Twitter) Search",
+		description:
+			"Search X/Twitter in real time (posts, users, threads). Keyword/semantic run as PARALLEL instant search: the xAI x_search hosted tool (grok login / XAI_API_KEY, results merged, deduped) alongside the fused multi-engine route (Tavily/Brave/Exa or exa-free, site-restricted to x.com). Works even with NO credentials — routes straight to multi-engine + oEmbed full-text enhancement. Four modes: keyword (X advanced syntax: from:user, since:YYYY-MM-DD, min_faves:N), semantic (natural language), user (structured profile + timeline via guest GraphQL), thread (full conversation by post id). Configure credentials with /x-login.",
+		promptSnippet: "Search X/Twitter posts, users, and threads via the xAI x_search API (direct, no subprocess)",
+		promptGuidelines: [
+			"x_search: type=keyword for real-time post search with X advanced syntax (from:user, since:/until:date, min_faves:N, lang:xx); type=semantic for natural-language relevance; type=user to get a structured account profile + recent timeline (followers, bio, posts with engagement); type=thread with a post id (or x.com/.../status/<id> URL) for the full conversation.",
+			"x_search: keyword/semantic run x_search ∥ multi-engine in parallel and merge results (real-time posts + engine-indexed posts, deduped). user prefers guest GraphQL (structured); thread uses oEmbed.",
+			"x_search works without any X credentials (multi-engine + oEmbed fallback); with grok login (/x-login) or XAI_API_KEY the hosted x_search tool runs in parallel for live in-app search results.",
+			"Route X-specific questions (trends, sentiment, what people say on X, account info, thread reconstruction) to x_search; general web questions to fused_search.",
+		],
+		parameters: Type.Object({
+			type: StringEnum(["keyword", "semantic", "user", "thread"], {
+				description: "Which X search mode: keyword (X advanced syntax), semantic (natural language), user (accounts), thread (conversation by post id)",
+			}),
+			query: Type.Optional(Type.String({ description: "Search query (keyword: X advanced syntax; semantic: natural language)" })),
+			username: Type.Optional(Type.String({ description: "Username/handle to search (type=user), or from: target for keyword" })),
+			post_id: Type.Optional(Type.String({ description: "X post/status id or x.com/.../status/<id> URL (type=thread)" })),
+			from_date: Type.Optional(Type.String({ description: "Date range start (ISO8601 YYYY-MM-DD), keyword/semantic" })),
+			to_date: Type.Optional(Type.String({ description: "Date range end (ISO8601 YYYY-MM-DD), keyword/semantic" })),
+			allowed_x_handles: Type.Optional(Type.Array(Type.String(), { description: "Only consider posts from these handles (max 20)" })),
+			excluded_x_handles: Type.Optional(Type.Array(Type.String(), { description: "Exclude posts from these handles (max 20; not with allowed_x_handles)" })),
+			model: Type.Optional(Type.String({ description: "Driving model (default grok-4.6)" })),
+			reasoning_effort: Type.Optional(StringEnum(["minimal", "low", "medium", "high", "xhigh"], { description: "Reasoning effort (default low = fast; results identical, latency much lower)" })),
+		}),
+		async execute(toolCallId, params, signal, onUpdate, _ctx) {
+			const onProgress = (msg: string) => onUpdate?.({ content: [{ type: "text", text: msg }], details: {} });
+			const started = Date.now();
+			const kind = params.type as XSearchType;
+			const subj = kind === "thread" ? params.post_id : params.query ?? params.username;
+			const cacheKey = ["xsearch", kind, subj ?? "", params.from_date ?? "", params.to_date ?? "", (params.allowed_x_handles ?? []).join(","), (params.excluded_x_handles ?? []).join(",")].join("|");
+			const ttl = kind === "thread" ? 900 : kind === "user" ? 600 : 300;
+			const cached = cache.get<unknown>(cacheKey);
+			const evt: AuditXSearchEvent = {
+				type: "xsearch",
+				ts: new Date().toISOString(),
+				subtype: kind,
+				query: kind === "thread" ? undefined : subj,
+				postId: kind === "thread" ? params.post_id : undefined,
+				results: 0,
+				cacheHit: !!cached,
+				tookMs: 0,
+			};
+			if (cached) {
+				evt.tookMs = Date.now() - started;
+				evt.results = Array.isArray(cached) ? cached.length : 1;
+				audit.write(evt);
+				return { content: [{ type: "text", text: `X search: ${kind} "${subj}" — CACHE HIT (${evt.tookMs}ms)\n\n${JSON.stringify(cached)}` }], details: { cacheHit: true, tookMs: evt.tookMs } };
+			}
+			if (!subj) {
+				evt.error = kind === "thread" ? "post_id required" : "query or username required";
+				evt.tookMs = Date.now() - started;
+				audit.write(evt);
+				return { content: [{ type: "text", text: `x_search ${kind} failed: ${evt.error}` }], details: { error: evt.error } };
+			}
+			try {
+				// ---- 引擎即时搜索通道（多引擎路由，限 x.com）----
+				const engineSearch = async (q: string, n: number) => {
+					const r = await fusedSearch({
+						query: q,
+						includeDomains: ["x.com", "twitter.com"],
+						maxResults: n,
+						complexity: "simple",
+						cache,
+						signal,
+						progress: onProgress,
+					});
+					return r.results.map((h) => ({ title: h.title, url: h.url, snippet: h.snippet, domain: h.domain }));
+				};
+				const renderItems = (items: unknown[]): string =>
+					items
+						.map((item) => {
+							const it = item as Record<string, unknown>;
+							if (Array.isArray(it.recent_posts)) {
+								const posts = (it.recent_posts as Array<Record<string, unknown>>).slice(0, 3);
+								return `${it.name} (@${it.username}) — followers ${it.followers ?? "?"}, verified ${it.verified ?? false}\n  bio: ${it.bio ?? ""}\n  recent: ${posts.map((p) => `${p.text}`.slice(0, 80)).join(" | ") || "(none)"}`;
+							}
+							return `${it.author ? it.author + (it.username ? ` (@${it.username})` : "") + ": " : ""}${it.text || it.url}`;
+						})
+						.join("\n");
+				const renderFallback = async (
+					primaryErr: string,
+				): Promise<{ content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> }> => {
+					try {
+						const fb = await fallbackXSearch({
+							type: kind,
+							query: params.query,
+							username: params.username,
+							post_id: params.post_id,
+							signal,
+							webSearch: engineSearch,
+						});
+						cache.set(cacheKey, fb.data, ttl);
+						evt.tookMs = Date.now() - started;
+						evt.results = Array.isArray(fb.data) ? fb.data.length : 1;
+						evt.credential = `fallback:${fb.via}`;
+						audit.write(evt);
+						return {
+							content: [
+								{
+									type: "text",
+									text: `X search: ${kind} "${subj}" — FALLBACK (via ${fb.via}) ${evt.results} result(s) in ${evt.tookMs}ms\n(primary failed: ${primaryErr.slice(0, 200)})\n\n${renderItems(Array.isArray(fb.data) ? fb.data : [])}`,
+								},
+							],
+							details: { results: evt.results, tookMs: evt.tookMs, credential: `fallback:${fb.via}`, primaryError: primaryErr.slice(0, 300) },
+						};
+					} catch (fbErr) {
+						evt.tookMs = Date.now() - started;
+						evt.error = `${primaryErr} | fallback: ${fbErr instanceof Error ? fbErr.message.slice(0, 200) : String(fbErr)}`;
+						audit.write(evt);
+						return { content: [{ type: "text", text: `x_search ${kind} failed: ${evt.error}` }], details: { error: evt.error } };
+					}
+				};
+
+				// ---- 凭据预检：无 x_search 凭据时直接走多引擎（不等主路径超时）----
+				if (!xAuthAvailableSync()) {
+					onProgress(`x_search: 无 xAI 凭据（/x-login 或 XAI_API_KEY）— 多引擎即时搜索…`);
+					return await renderFallback("no xAI credentials (x_search primary path unavailable)");
+				}
+
+				// ---- 有凭据：keyword/semantic 并行即时搜索（x_search 主路径 ∥ 多引擎）----
+				if (kind === "keyword" || kind === "semantic") {
+					onProgress(`x_search: ${kind} "${subj}" — 并行即时搜索 (x_search + 多引擎)…`);
+					const engQuery = params.query ?? (params.username ? `from:${params.username}` : subj ?? "");
+					const [xOutcome, engOutcome] = await Promise.allSettled([
+						runXTool({
+							type: kind,
+							query: params.query,
+							username: params.username,
+							post_id: params.post_id,
+							from_date: params.from_date,
+							to_date: params.to_date,
+							allowed_x_handles: params.allowed_x_handles,
+							excluded_x_handles: params.excluded_x_handles,
+							model: params.model,
+							reasoning_effort: params.reasoning_effort as "minimal" | "low" | "medium" | "high" | "xhigh" | undefined,
+							signal,
+						}),
+						engineSearch(engQuery, 5),
+					]);
+					if (xOutcome.status === "fulfilled") {
+						const xPosts = Array.isArray(xOutcome.value.data) ? (xOutcome.value.data as Array<Record<string, unknown>>) : [];
+						// 引擎结果补充（按 id/url 去重，x 结果优先）
+						const extra =
+							engOutcome.status === "fulfilled"
+								? engOutcome.value.filter((h) => h.title || h.snippet).map(hitToPost).filter(
+										(p) => !xPosts.some((x) => (x.id && x.id === p.id) || (x.url && x.url === p.url)),
+								)
+								: [];
+						const merged = [...xPosts, ...extra];
+						cache.set(cacheKey, merged, ttl);
+						evt.tookMs = Date.now() - started;
+						evt.results = merged.length;
+						evt.credential = xOutcome.value.credential + (extra.length ? "+engines" : "");
+						audit.write(evt);
+						return {
+							content: [
+								{
+									type: "text",
+									text: `X search: ${kind} "${subj}" — ${merged.length} result(s) in ${evt.tookMs}ms (${xOutcome.value.credential}${extra.length ? " + multi-engine parallel" : ""})\n\n${renderItems(merged)}`,
+								},
+							],
+							details: { results: merged.length, tookMs: evt.tookMs, credential: evt.credential, xResults: xPosts.length, engineResults: extra.length },
+						};
+					}
+					// x 主路径失败 → 多引擎兜底
+					return await renderFallback(xOutcome.reason instanceof Error ? xOutcome.reason.message : String(xOutcome.reason));
+				}
+
+				// ---- user / thread：串行主路径 → 多引擎/guest/oEmbed 兜底 ----
+				onProgress(`x_search: ${kind} "${subj}" — direct API call…`);
+				try {
+					const res = await runXTool({
+						type: kind,
+						query: params.query,
+						username: params.username,
+						post_id: params.post_id,
+						from_date: params.from_date,
+						to_date: params.to_date,
+						allowed_x_handles: params.allowed_x_handles,
+						excluded_x_handles: params.excluded_x_handles,
+						model: params.model,
+						reasoning_effort: params.reasoning_effort as "minimal" | "low" | "medium" | "high" | "xhigh" | undefined,
+						signal,
+					});
+					cache.set(cacheKey, res.data, ttl);
+					evt.tookMs = Date.now() - started;
+					evt.results = Array.isArray(res.data) ? res.data.length : typeof res.data === "object" && res.data !== null ? 1 : 0;
+					evt.credential = res.credential;
+					audit.write(evt);
+					const payload = typeof res.data === "string" ? res.data : JSON.stringify(res.data, null, 2);
+					return {
+						content: [
+							{
+								type: "text",
+								text: `X search: ${res.type} "${subj}" — ${evt.results} result(s) in ${res.tookMs}ms via ${res.credential} (cached ${ttl}s)\n\n${payload.slice(0, 100_000)}`,
+							},
+						],
+						details: { results: evt.results, tookMs: res.tookMs, credential: res.credential },
+					};
+				} catch (err) {
+					return await renderFallback(err instanceof Error ? err.message : String(err));
+				}
+			} catch (err) {
+				evt.tookMs = Date.now() - started;
+				evt.error = err instanceof Error ? err.message.slice(0, 500) : String(err);
+				audit.write(evt);
+				return { content: [{ type: "text", text: `x_search ${kind} failed: ${evt.error}` }], details: { error: evt.error } };
+			}
+		},
+	});
+
+	pi.registerCommand("x-login", {
+		description:
+			"Import xAI credentials into pi's own directory for x_search: /x-login (from your grok login), /x-login -k <XAI_API_KEY>, /x-login status. No grok subprocess needed afterwards.",
+		handler: async (args, ctx) => {
+			const cmd = (args ?? "").trim();
+			try {
+				if (cmd === "status" || cmd === "") {
+					if (cmd === "") {
+						// bare /x-login = import from grok
+						const imported = importFromGrok();
+						const claims = jwtTier(imported.key ?? "");
+						ctx.ui.notify(
+							`x-login: imported grok session → ${piAuthPath()}\nemail: ${imported.email ?? "?"} | tier: ${tierName(claims?.tier)} | expires: ${claims?.exp ? new Date(claims.exp * 1000).toISOString() : "?"}`,
+						"info",
+					);
+						return;
+					}
+					const st = authStatus();
+					ctx.ui.notify(`x-login status: ${st.source} — ${st.detail}\n(pi-local file: ${piAuthPath()})`, "info");
+					return;
+				}
+				if (cmd.startsWith("-k ") || cmd.startsWith("--key ")) {
+					const key = cmd.split(/\s+/)[1] ?? "";
+					importApiKey(key);
+					ctx.ui.notify(`x-login: API key saved → ${piAuthPath()} (public api.x.ai will be used for x_search)`, "info");
+					return;
+				}
+				ctx.ui.notify("usage: /x-login | /x-login -k <XAI_API_KEY> | /x-login status", "info");
+			} catch (err) {
+				ctx.ui.notify(`x-login failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+			}
 		},
 	});
 

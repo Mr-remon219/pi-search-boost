@@ -1,7 +1,7 @@
 {
   "name": "pi-search-boost",
-  "version": "0.0.2",
-  "description": "Multi-engine research-grade web search for pi: fused retrieval, deep research loops, parallel subagents, focus-filtered page reading, caching, and auditability.",
+  "version": "0.0.3",
+  "description": "Multi-engine research-grade web search for pi: fused retrieval, deep research loops, parallel subagents, focus-filtered page reading, real-time X/Twitter search, caching, and auditability.",
   "type": "module",
   "keywords": [
     "pi-package",
@@ -13,7 +13,9 @@
     "brave",
     "jina",
     "llm",
-    "agent"
+    "agent",
+    "x-search",
+    "twitter"
   ],
   "license": "MIT",
   "peerDependencies": {
