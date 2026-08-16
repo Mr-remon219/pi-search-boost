@@ -1,6 +1,6 @@
 {
   "name": "pi-search-boost",
-  "version": "0.0.4",
+  "version": "0.1.0",
   "description": "Multi-engine research-grade web search for pi: fused retrieval, deep research loops, parallel subagents, focus-filtered page reading, real-time X/Twitter search, caching, and auditability.",
   "type": "module",
   "keywords": [
@@ -27,5 +27,30 @@
     "extensions": [
       "./index.ts"
     ]
+  },
+  "files": [
+    "index.ts",
+    "lib",
+    "README.md",
+    "README_zh.md",
+    "RELEASE_NOTES_v0.0.1.md",
+    "RELEASE_NOTES_v0.0.2.md",
+    "RELEASE_NOTES_v0.0.3.md",
+    "RELEASE_NOTES_v0.0.4.md",
+    "RELEASE_NOTES_v0.1.0.md",
+    "AGENTS.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mr-remon219/pi-search-boost.git"
+  },
+  "homepage": "https://github.com/Mr-remon219/pi-search-boost",
+  "bugs": {
+    "url": "https://github.com/Mr-remon219/pi-search-boost/issues"
+  },
+  "author": "Mr-remon219",
+  "engines": {
+    "node": ">=18"
   }
 }
