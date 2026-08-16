@@ -82,7 +82,7 @@ Once installed, paste this into a pi session — the agent reads this README and
 
 ## Search layers: `/web_change`
 
-Two layers, switched at runtime (persisted to `~/.pi/agent/search-boost-layer.json`, default `api`):
+Two layers, switched at runtime (persisted to `~/.pi/agent/search-boost-layer.json`). **Default:** `api` when Tavily/Brave/Exa keys are configured, otherwise `free` (keyless — works out of the box):
 
 | Layer | Engines | Keys | Notes |
 | --- | --- | --- | --- |
@@ -261,10 +261,10 @@ lib/util.ts     fetch with timeout/signal, HTML decoding, URL normalization, CJK
 
 ## Known limitations
 
-- **X/Twitter data**: not included (X API is paid; guest-token scraping is dead since 2025). Tavily/Exa indexes are the practical substitute.
+- **X/Twitter live data**: the hosted x_search path needs grok login or `XAI_API_KEY`; without credentials, `x_search` uses multi-engine + guest GraphQL + oEmbed fallbacks (indexed posts, not the full firehose).
 - **Model-native triggering**: search triggering is policy-driven (system prompt), not RL-trained into the model.
-- **No self-hosted index**: retrieval is proxied via Tavily / Brave / Exa; there is no local index of the web.
-- **API keys required**: Bing HTML and Brave HTML scrapers were removed (wrong-entity pollution / IP 429). The `api` layer needs Tavily/Brave/Exa keys; the `free` layer needs none but is a single keyless engine (Exa MCP) that can rate-limit (429) — switch back with `/web_change api`.
+- **No self-hosted index**: retrieval is proxied via Tavily / Brave / Exa / Exa MCP; there is no local index of the web.
+- **API keys for fusion**: the `api` layer needs Tavily/Brave/Exa keys for multi-engine fusion; the `free` layer needs none but is a single keyless engine (Exa MCP) that can rate-limit (429) — switch with `/web_change api` once keys are configured.
 
 ---
 

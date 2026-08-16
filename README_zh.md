@@ -238,11 +238,10 @@ lib/util.ts     带超时/信号的 fetch、HTML 解码、URL 归一化、CJK �
 
 ## 已知限制
 
-- **X/Twitter 数据**：不包含（X API 收费；guest-token 抓取 2025 年起已死）。用 Tavily/Exa 索引作为实际替代。
+- **X/Twitter 实时数据**：托管 x_search 路径需要 grok 登录或 `XAI_API_KEY`；无凭据时 `x_search` 走多引擎 + guest GraphQL + oEmbed 降级（索引帖子，非完整实时流）。
 - **模型原生触发**：搜索触发靠策略（系统提示词）驱动，不是 RL 训练进模型。
-- **Bing HTML 解析**：依赖 Bing 页面结构；结构变化会被检测并响亮失败（绝不静默返回空）。
-- **无自建索引**：检索走 4 个引擎代理，没有本地网页索引。
-- **free 层是单引擎**：keyless 的 Exa MCP 可能 429；失败会大声报错并提示 `/web_change api`，绝不静默返回空、也绝不回退刮页。
+- **无自建索引**：检索经 Tavily / Brave / Exa / Exa MCP 代理，没有本地网页索引。
+- **free 层是单引擎**：keyless 的 Exa MCP 可能 429；配置 API 密钥后用 `/web_change api` 开启多引擎融合。
 
 ---
 

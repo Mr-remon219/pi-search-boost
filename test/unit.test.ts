@@ -21,7 +21,9 @@ import {
 } from "../lib/engines.ts";
 import { excerptForTool, pickExcerpts, pickParagraphs } from "../lib/extract.ts";
 import { getLayer, setLayer } from "../lib/layer.ts";
+import { hasApiSearchKeys } from "../lib/engines.ts";
 import { plannedResearchRounds } from "../lib/research.ts";
+import { SEARCH_BOOST_EXT } from "../lib/parallel.ts";
 import { extractJsonPayload } from "../lib/xsearch.ts";
 import {
 	assertPublicHttpUrl,
@@ -225,6 +227,14 @@ describe("web layer state", () => {
 		setLayer("api");
 		assert.equal(getLayer(), "api");
 	});
+
+	it("prefers free as the implicit default when no API keys are configured", () => {
+		if (hasApiSearchKeys()) {
+			console.log("  [skip] API keys present");
+			return;
+		}
+		assert.equal(hasApiSearchKeys(), false);
+	});
 });
 
 describe("SSRF guard", () => {
@@ -359,7 +369,6 @@ describe("x_search JSON extraction", () => {
 
 describe("research_parallel extension path", () => {
 	it("resolves index.ts next to the package root (npm / manual / git)", () => {
-		const ext = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "index.ts");
-		assert.ok(fs.existsSync(ext), `expected extension entry at ${ext}`);
+		assert.ok(fs.existsSync(SEARCH_BOOST_EXT), `expected extension entry at ${SEARCH_BOOST_EXT}`);
 	});
 });

@@ -47,8 +47,8 @@ echo  [OK] Files copied.
 REM ---- optional env keys ----
 echo.
 echo  ============================================
-echo   Optional API keys (skip all = keyless mode:
-echo   Bing HTML + Jina Reader still work)
+echo   Optional API keys (skip all = keyless free layer:
+echo   exa-free via /web_change free, plus Jina Reader for fetch_page)
 echo  ============================================
 echo.
 set "KEY_NONE=1"
@@ -80,7 +80,7 @@ echo  ============================================
 echo   Verification
 echo  ============================================
 if "%KEY_NONE%"=="1" (
-    echo   [INFO] No API keys configured - keyless mode (bing + jina).
+    echo   [INFO] No API keys configured - using free layer (exa-free + jina).
 )
 echo   Extension installed at: %DEST%
 echo.

@@ -33,8 +33,8 @@ echo "  [OK] Files copied."
 # ---- optional env keys ----
 echo
 echo "  ============================================"
-echo "   Optional API keys (skip all = keyless mode:"
-echo "   Bing HTML + Jina Reader still work)"
+echo "   Optional API keys (skip all = keyless free layer:"
+echo "   exa-free via /web_change free, plus Jina Reader for fetch_page)"
 echo "  ============================================"
 echo
 
