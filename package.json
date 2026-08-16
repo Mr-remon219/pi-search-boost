@@ -50,6 +50,11 @@
     "url": "https://github.com/Mr-remon219/pi-search-boost/issues"
   },
   "author": "Mr-remon219",
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/unit.test.ts",
+    "test:blackbox": "node --experimental-strip-types --test test/blackbox.test.ts",
+    "test:all": "node --experimental-strip-types --test test/unit.test.ts test/blackbox.test.ts"
+  },
   "engines": {
     "node": ">=18"
   }

@@ -3,13 +3,18 @@
 ## Cursor Cloud specific instructions
 
 ### What this repo is
-`pi-search-boost` is a **TypeScript extension for the `pi` coding agent** (`@earendil-works/pi-coding-agent`). It is not a standalone app: `index.ts` exports `searchBoostExtension(pi)` which registers 4 tools (`fused_search`, `fetch_page`, `deep_research`, `research_parallel`) + 2 TUI commands (`/search-cache`, `/search-audit`) and injects the `<search_balance>` policy into pi's system prompt. See `README.md` for the full design.
+`pi-search-boost` is a **TypeScript pi-package** (`package.json` → `pi.extensions`) for the [`pi`](https://github.com/earendil-works/pi-coding-agent) coding agent. `index.ts` exports `searchBoostExtension(pi)` which registers **5 tools** (`fused_search`, `fetch_page`, `deep_research`, `research_parallel`, `x_search`) + **5 TUI commands** (`/search-cache`, `/search-audit`, `/web_change`, `/x-login`, `/x-logout`) and injects the `<search_balance>` policy into pi's system prompt. See `README.md` for the full design.
 
-There is **no `package.json`, no lockfile, and no lint/test/build tooling** in this repo — pi runs the `.ts` files directly (no bundler). The only documented verification is a manual smoke test. Dependencies (`@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`, `typebox`) are provided by the installed `pi` runtime, not vendored here.
+Dependencies (`@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`, `typebox`) are peer deps resolved by the installed `pi` runtime — no bundler.
 
-### Runtime / environment (already set up by the update script)
+### Runtime / environment
 - The `pi` CLI is installed globally via npm into `~/.npm-global` and is on `PATH` for login shells (added to `~/.bashrc`). `~/.npmrc` sets `prefix=~/.npm-global` so `npm install -g` is writable. Because of this prefix, nvm prints a harmless warning (`.npmrc ... incompatible with nvm`) at shell start — ignore it; `pi` still resolves and runs.
-- The update script also re-deploys this repo's files into `~/.pi/agent/extensions/search-boost/` (pi's auto-discovery dir). This deployment is **required for `research_parallel`**, which spawns `pi` child processes pointed at `getAgentDir()/extensions/search-boost/index.ts` (see `lib/parallel.ts`). Keep that copy in sync with the repo (the update script does this automatically).
+- **Install paths:** `pi install npm:pi-search-boost` / `pi install .` / `pi install git:…` all work. `research_parallel` resolves the extension entry via `import.meta.url` (package-local `index.ts`), so it does **not** require a separate copy under `~/.pi/agent/extensions/search-boost/` — though `install.sh` still supports manual copy for discovery-only setups.
+
+### Search layers (first-run UX)
+- `/web_change` switches `free` (keyless Exa MCP) vs `api` (Tavily+Brave+Exa).
+- **Default layer:** `api` when any `PI_SEARCH_*` key is set, otherwise `free` — so keyless users can search immediately.
+- Persisted to `~/.pi/agent/search-boost-layer.json`.
 
 ### Running the extension end-to-end (needs an LLM API key)
 The full agent loop drives an LLM that decides to call the tools. pi defaults to provider `google` (model `gemini-*`), so set `GEMINI_API_KEY` (or use another provider + `--provider/--model`, or `pi /login`). Example smoke test:
@@ -18,11 +23,28 @@ pi -ne -e /workspace/index.ts -p "fused_search 'tokio latest version'"
 ```
 Without a key, pi loads the extension and registers all tools, then fails only at the LLM call with an API-key error — that error still confirms the extension itself loaded cleanly.
 
-### Testing the core WITHOUT an LLM key (fast, no key required)
-The value of this repo lives in `lib/` and is LLM-free. `fused_search`, `fetch_page`, and `deep_research` can be exercised directly against the live web (free layer = keyless Exa MCP + Jina Reader, no API keys needed; api layer = Tavily/Brave/Exa keys — switch with `/web_change`). `lib/engines.ts`, `lib/extract.ts`, `lib/research.ts`, `lib/cache.ts`, and `lib/util.ts` import only each other + node built-ins, so a tiny harness that imports them runs under node type-stripping:
+### Testing WITHOUT an LLM key
+**Unit tests (offline, fast):**
+```bash
+npm test
+# or: node --experimental-strip-types --test test/unit.test.ts
+```
+
+**Black-box / integration tests (live network, free layer — no API keys):**
+```bash
+npm run test:blackbox
+# or: node --experimental-strip-types --test test/blackbox.test.ts
+```
+Covers `fused_search` (exa-free), `fetch_page` (Jina), `deep_research` step mode, `x_search` fallback, pi extension load smoke test, and cache/audit side effects.
+
+**Direct lib harness** (LLM-free, for debugging a single module):
 ```bash
 node --experimental-strip-types your_harness.ts   # import { fusedSearch } from "/workspace/lib/engines.ts"
 ```
-Only `research_parallel` (spawns `pi` subprocesses) and the `index.ts` registration layer require the `pi` deps.
 
-Search API keys (needed for the api layer only; the free layer needs none): `PI_SEARCH_TAVILY_KEY`, `PI_SEARCH_EXA_KEY`, `PI_SEARCH_BRAVE_KEY` — see `.env.example`.
+Search API keys (api layer only; free layer needs none): `PI_SEARCH_TAVILY_KEY`, `PI_SEARCH_EXA_KEY`, `PI_SEARCH_BRAVE_KEY` — see `.env.example`.
+
+### Sync manual extension copy (optional)
+```bash
+./install.sh   # copies to ~/.pi/agent/extensions/search-boost/
+```
