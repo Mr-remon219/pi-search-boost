@@ -25,7 +25,21 @@ The behavior layer is guided by a proactive-search policy (the `<search_balance>
 
 **Prerequisites:** pi installed (v0.84 or newer recommended; the extension uses `pi.registerTool` and the `before_agent_start` system-prompt injection). No build step, no bundler.
 
-### Option A: one-command install from git (recommended)
+### Option A: install from npm (recommended)
+
+Published as [`pi-search-boost`](https://www.npmjs.com/package/pi-search-boost) — pi installs it automatically (runs `npm install`, resolves peer deps):
+
+```bash
+# 1. Try it first without installing (runs once from a temp dir):
+pi -e npm:pi-search-boost -p "fused_search 'tokio latest version'"
+
+# 2. Install:
+pi install npm:pi-search-boost
+```
+
+Then restart pi or run `/reload`. To update later: `pi update npm:pi-search-boost` (pinned version specs are skipped — install an explicit version to move: `pi install npm:pi-search-boost@0.1.0`).
+
+### Option B: one-command install from git
 
 No clone needed — pi clones the repo, registers it in `~/.pi/agent/settings.json`, and loads it as a package.
 
@@ -39,7 +53,7 @@ pi install git:github.com/Mr-remon219/pi-search-boost
 
 Then restart pi or run `/reload`.
 
-### Option B: clone, then install locally
+### Option C: clone, then install locally
 
 ```bash
 git clone https://github.com/Mr-remon219/pi-search-boost.git
@@ -47,7 +61,7 @@ cd pi-search-boost
 pi install .
 ```
 
-### Option C: manual copy (fallback — no pi package mechanism)
+### Option D: manual copy (fallback — no pi package mechanism)
 
 ```bash
 # Windows

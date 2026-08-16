@@ -25,7 +25,21 @@
 
 **前置**：已安装 pi（建议 v0.84 或更新；扩展用到 `pi.registerTool` 与 `before_agent_start` 系统提示词注入）。无需构建、无需打包。
 
-### 方式 A：git 一键安装（推荐）
+### 方式 A：npm 一键安装（推荐）
+
+已发布到 [`pi-search-boost`](https://www.npmjs.com/package/pi-search-boost)（npm）——pi 自动安装（跑 `npm install`、解析 peer 依赖）：
+
+```bash
+# 1. 先试用（不安装，临时目录跑一次）：
+pi -e npm:pi-search-boost -p "fused_search 'tokio latest version'"
+
+# 2. 正式安装：
+pi install npm:pi-search-boost
+```
+
+然后重启 pi 或执行 `/reload`。之后升级：`pi update npm:pi-search-boost`（锁定版本不会被自动更新——要升级到指定版本用 `pi install npm:pi-search-boost@0.1.0`）。
+
+### 方式 B：git 一键安装
 
 无需 clone——pi 自动克隆仓库、注册进 `~/.pi/agent/settings.json`、并按 package 规则加载。
 
@@ -39,7 +53,7 @@ pi install git:github.com/Mr-remon219/pi-search-boost
 
 然后重启 pi 或执行 `/reload`。
 
-### 方式 B：clone 后本地安装
+### 方式 C：clone 后本地安装
 
 ```bash
 git clone https://github.com/Mr-remon219/pi-search-boost.git
@@ -47,7 +61,7 @@ cd pi-search-boost
 pi install .
 ```
 
-### 方式 C：手动复制（兜底——不用 pi 的包机制）
+### 方式 D：手动复制（兜底——不用 pi 的包机制）
 
 ```bash
 # Windows
