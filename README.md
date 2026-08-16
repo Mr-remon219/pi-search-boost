@@ -108,7 +108,7 @@ Without any keys, the extension still works in **keyless mode** (Bing HTML + Bra
 | --- | --- |
 | `query` | The question or topic |
 | `queries` | Optional keyword variants (auto-derived if omitted) |
-| `engines` | Subset: `bing`, `tavily`, `exa`, `brave` |
+| `engines` | Subset: `bing` (keyless), `bravehtml` (keyless), `tavily`, `exa`, `brave` |
 | `max_results` | Max fused results (1-20, default 10) |
 | `include_domains` / `exclude_domains` | Hard client-side domain filters (engines ignore `site:` operators) |
 | `recency` | `day`/`week`/`month`/`year` — half-life exponential decay for dated results |
