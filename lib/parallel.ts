@@ -13,7 +13,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { fileURLToPath } from "node:url";
 import { pool } from "./util.ts";
 
 export interface SubtaskResult {
@@ -56,7 +56,8 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
 	return { command: "pi", args };
 }
 
-const SEARCH_BOOST_EXT = path.join(getAgentDir(), "extensions", "search-boost", "index.ts");
+/** Resolve next to this package's index.ts (works for npm, git, and manual installs). */
+const SEARCH_BOOST_EXT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "index.ts");
 
 function buildSubtaskPrompt(subtask: string, maxSources: number): string {
 	return [

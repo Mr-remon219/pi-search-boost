@@ -592,7 +592,16 @@ const SCORE_PARAMS = {
 
 const ENGINE_WEIGHT: Record<string, number> = { tavily: 1.2, exa: 1.2, brave: 1.1, "exa-free": 1.0 };
 
-function domainBonus(domain: string): number {
+export function domainBonus(domain: string, includeDomains: string[] = []): number {
+	// Caller explicitly restricted to this domain (e.g. x_search site:x.com) —
+	// never junk-penalize an intentionally included host.
+	if (includeDomains.length > 0 && includeDomains.some((d) => domainMatches(domain, d))) {
+		if (AUTHORITATIVE_TLDS.some((t) => domain.endsWith(t))) return SCORE_PARAMS.authoritativeBonus;
+		if (domainMatches(domain, "wikipedia.org") || domainMatches(domain, "github.com")) {
+			return SCORE_PARAMS.wikipediaGithubBonus;
+		}
+		return 0;
+	}
 	if (AUTHORITATIVE_TLDS.some((t) => domain.endsWith(t))) return SCORE_PARAMS.authoritativeBonus;
 	if (domainMatches(domain, "wikipedia.org") || domainMatches(domain, "github.com")) {
 		return SCORE_PARAMS.wikipediaGithubBonus;
@@ -857,7 +866,7 @@ export async function fusedSearch(opts: FusedOptions): Promise<FusedResult> {
 					rec = SCORE_PARAMS.recencyUndatedPenalty;
 				}
 			}
-			return { ...r, score: Math.round((r.score + cross + rel + rec + domainBonus(r.domain)) * 100) / 100 };
+			return { ...r, score: Math.round((r.score + cross + rel + rec + domainBonus(r.domain, includeDomains)) * 100) / 100 };
 		})
 		.sort((a, b) => b.score - a.score);
 	// Per-domain diversity: soft decay (x-algorithm 'author diversity' pattern) —

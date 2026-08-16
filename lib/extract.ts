@@ -51,7 +51,7 @@ async function fetchViaJina(
 	} else {
 		headers["X-Timeout"] = "15";
 	}
-	const res = await fetchText(`https://r.jina.ai/${url}`, {
+	const res = await fetchText(`https://r.jina.ai/${encodeURIComponent(url)}`, {
 		timeoutMs: opts.engine === "browser" ? 25000 : 20000,
 		signal,
 		headers,

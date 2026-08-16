@@ -34,15 +34,23 @@ function agentDir(): string {
 const STATE_FILE = path.join(agentDir(), "search-boost-layer.json");
 
 let cached: WebLayer | undefined;
+let cachedMtimeMs = -1;
 
 /** Serialize writes so a busy session cannot corrupt/race the state file. */
 let writeQueue: Promise<void> = Promise.resolve();
 
 export function getLayer(): WebLayer {
-	if (cached) return cached;
+	// Local setLayer() may have updated cached before the async disk write finishes.
+	if (cached && cachedMtimeMs === -1) return cached;
 	try {
+		const mtimeMs = fs.statSync(STATE_FILE).mtimeMs;
+		if (cached && cachedMtimeMs === mtimeMs) return cached;
 		const raw = JSON.parse(fs.readFileSync(STATE_FILE, "utf8")) as { layer?: unknown };
-		if (raw?.layer === "free" || raw?.layer === "api") cached = raw.layer;
+		if (raw?.layer === "free" || raw?.layer === "api") {
+			cached = raw.layer;
+			cachedMtimeMs = mtimeMs;
+			return cached;
+		}
 	} catch {
 		/* no state file yet — default api */
 	}
@@ -51,6 +59,7 @@ export function getLayer(): WebLayer {
 
 export function setLayer(layer: WebLayer): WebLayer {
 	cached = layer;
+	cachedMtimeMs = -1;
 	writeQueue = writeQueue.then(() => {
 		try {
 			const dir = path.dirname(STATE_FILE);
@@ -58,6 +67,11 @@ export function setLayer(layer: WebLayer): WebLayer {
 			const tmp = `${STATE_FILE}.tmp`;
 			fs.writeFileSync(tmp, JSON.stringify({ layer }, null, 2), "utf8");
 			fs.renameSync(tmp, STATE_FILE);
+			try {
+				cachedMtimeMs = fs.statSync(STATE_FILE).mtimeMs;
+			} catch {
+				cachedMtimeMs = -1;
+			}
 		} catch (err) {
 			// never break a search over state persistence
 			console.error("search-boost: failed to persist layer state:", err);
