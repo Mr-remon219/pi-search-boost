@@ -14,6 +14,7 @@ The behavior layer is guided by a proactive-search policy (the `<search_balance>
 - **Focus-filtered page reading** — `fetch_page` with a `focus` parameter keeps only query-relevant paragraphs (measured ~95% token savings)
 - **Deep research loop** — search → fetch → extract → coverage check → follow-up queries → converge, with per-source corroboration (≥2 independent domains for key claims)
 - **Parallel multi-agent research** — decompose a question into 2-4 subtasks, each run as an independent pi subprocess with its own search budget
+- **Real-time X/Twitter search** — `x_search`: the hosted x_search tool (grok login / `XAI_API_KEY`) runs ∥ the fused multi-engine route in parallel, results merged and deduped; structured user profiles via X's anonymous guest GraphQL; oEmbed full-text; works with no credentials at all (~2s via multi-engine fallback)
 - **Caching** — search results (6h) and pages (24h) persist to disk; hot cache hits are ~1ms, cross-process
 - **Audit & observability** — every search/fetch/research event logged (JSONL, 5MB rotation) with tier, credits estimate, engine errors, timings; `/search-audit` and `/search-cache` commands in the TUI
 - **Proactive-search policy** — a `<search_balance>` ruleset injected before agent start: when to search by default (any moment of doubt), when to skip, when to stop (~3 rounds diminishing returns), autonomy/fallback rules, and coding-time triggers (search before writing code against an API you are unsure about)
@@ -143,6 +144,7 @@ Manual installs: update by re-running `install.bat`/`install.sh`; uninstall with
 | `fetch_page` | Reader-mode fetch: Jina Reader (keyless) → local heuristic extractor fallback → headless-browser engine for thin pages. `focus` parameter filters to relevant paragraphs (80-95% token savings) |
 | `deep_research` | Multi-round loop with coverage checking, per-source corroboration, primary-source hierarchy, and freshness. `mode=step` returns gaps + suggested queries for agent-driven iteration |
 | `research_parallel` | 2-4 independent subagents (pi child processes) each with its own search budget, run in parallel, then synthesize with cross-source verification |
+| `x_search` | Real-time X/Twitter search (posts, users, threads). keyword/semantic run the hosted x_search tool ∥ the fused multi-engine route in parallel and merge results; works with or without credentials (multi-engine + oEmbed fallback; guest GraphQL for structured user profiles) |
 
 ### fused_search parameters
 
@@ -162,9 +164,24 @@ Query style: stack 3-6 domain keywords plus specific terms (Grok Build style). `
 
 `fused_search` is the single search entry point (quick lookups: `complexity: "simple"`); `fetch_page` handles all page reading. No companion package is needed.
 
+### x_search parameters
+
+| Parameter | Description |
+| --- | --- |
+| `type` | `keyword` (X advanced syntax: `from:user`, `since:YYYY-MM-DD`, `min_faves:N`), `semantic` (natural language), `user` (structured profile + timeline), `thread` (conversation by post id / status URL) |
+| `query` / `username` / `post_id` | Target per type |
+| `from_date` / `to_date` | Date range (keyword/semantic) |
+| `allowed_x_handles` / `excluded_x_handles` | Hosted-tool handle filters (max 20, mutually exclusive) |
+| `model` / `reasoning_effort` | Driving model (default `grok-4.6`) and reasoning effort (default `low` — fast; results identical) |
+
+Routing: `keyword`/`semantic` → hosted x_search (grok login / `XAI_API_KEY`) ∥ fused multi-engine (site-restricted to x.com) in parallel, merged and deduped; with **no credentials** the multi-engine route + oEmbed full-text enhancement returns in ~2s. `user` → guest GraphQL (anonymous X web API: followers, bio, verified, recent posts with engagement) → multi-engine profile links. `thread` → oEmbed single-post full text.
+
+Credentials: `/x-login` imports your grok login into pi's own directory (`~/.pi/agent/xsearch-auth.json`); tokens auto-refresh (OIDC). No subprocess is ever spawned — pi POSTs the Responses-API request itself.
+
 ### TUI commands
 
 - `/web_change [free|api|show]` — switch the search layer (free = keyless Exa MCP single engine; api = tavily+brave+exa fusion)
+- `/x-login [|-k <XAI_API_KEY>|status]` — import xAI credentials into pi's own directory for x_search (bare = from your grok login; `-k` = API key; `status` = show the credential chain)
 - `/search-audit stats|recent|failures|domains|clear` — analyze the audit log: event counts, fetch success rates, engine errors, tier distribution, Tavily credit estimate, failing domains
 - `/search-cache stats|clear` — inspect or clear the cache
 
@@ -174,10 +191,20 @@ Query style: stack 3-6 domain keywords plus specific terms (Grok Build style). `
 
 ```
 index.ts        Tool registrations (fused_search, fetch_page, deep_research,
-                research_parallel), TUI commands, <search_balance> ruleset injection
+                research_parallel, x_search), TUI commands, <search_balance> ruleset
+                injection
 lib/engines.ts  Engine adapters (Tavily, Exa, Brave API, exa-free MCP), query preprocessing
                 (site:/OR/quotes), complexity routing, cross-engine fusion scoring,
                 recency decay
+lib/xsearch.ts  x_search primary path: pi POSTs the Responses API directly (hosted
+                x_search tool) with grok's OIDC session or XAI_API_KEY — no subprocess;
+                fast credential preflight (xAuthAvailableSync)
+lib/xauth.ts    Credential chain for x_search: XAI_API_KEY env → pi-local copy
+                (xsearch-auth.json, written by /x-login) → ~/.grok/auth.json; OIDC
+                token refresh with best-effort grok-file sync
+lib/xfallback.ts Credential-free fallback routing: multi-engine (site:x.com) + oEmbed
+                full-text enhancement; guest GraphQL (anonymous X web API: token
+                cached 2h, query ids self-heal on 404) for structured user profiles
 lib/layer.ts    Layer state (free | api) with disk persistence, switched by /web_change
 lib/extract.ts  Jina Reader + local heuristic extractor + headless-browser fallback,
                 focus paragraph filtering (dynamic filtering), caching
