@@ -61,7 +61,17 @@ Copies the extension to `~/.pi/agent/extensions/search-boost/` (pi auto-discover
 
 Once installed, paste this into a pi session — the agent reads this README and does the rest:
 
-> Read this README and complete the setup for me: confirm the extension loaded (search-audit stats), walk me through API keys (or configure the ones I paste), and run the verification steps.
+> Read this README and complete the setup for me: confirm the extension loaded (search-audit stats), install the optional companion package `@bytetrue/pi-web-search` so I also get `web_search` / `web_fetch`, walk me through API keys (or configure the ones I paste), and run the verification steps.
+
+### Optional companion: `web_search` / `web_fetch`
+
+This package provides `fused_search`, `fetch_page`, `deep_research`, and `research_parallel`. The lighter `web_search` / `web_fetch` tools are **not part of this repo** — they come from the separate pi package [`@bytetrue/pi-web-search`](https://www.npmjs.com/package/@bytetrue/pi-web-search), which the policy's tool-routing section references for quick single-point lookups. Install it to get the same complete toolset:
+
+```bash
+pi install npm:@bytetrue/pi-web-search
+```
+
+> TUN note: if you run Clash/sing-box in TUN mode, `web_fetch` needs the same fake-ip carve-out patched into its `src/html.ts` (`BYTE_PI_WEB_ALLOW_TUN_FAKEIP=0` to disable) — a node_modules patch that must be re-applied after the package is upgraded. See the note under [Known limitations](#known-limitations).
 
 ---
 
@@ -140,6 +150,8 @@ Manual installs: update by re-running `install.bat`/`install.sh`; uninstall with
 | `complexity` | `auto`/`simple`/`medium`/`complex` — budget tier override |
 
 Query style: stack 3-6 domain keywords plus specific terms (Grok Build style). `site:example.com` is auto-translated to a client-side include filter; `"a" OR "b"` auto-splits into parallel variants.
+
+The optional companion package `@bytetrue/pi-web-search` adds `web_search` (single-engine lookup) and `web_fetch` (raw page fetch).
 
 ### TUI commands
 

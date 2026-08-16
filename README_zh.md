@@ -61,7 +61,17 @@ chmod +x install.sh && ./install.sh
 
 安装后，把下面这段话粘贴给 pi——agent 会读这份 README 并自己完成：
 
-> 请阅读这份 README 帮我完成配置：确认扩展已加载（search-audit stats）、引导我配置 API keys（或配置我粘贴给你的 key）、并执行验证步骤。
+> 请阅读这份 README 帮我完成配置：确认扩展已加载（search-audit stats）、安装可选伴生包 `@bytetrue/pi-web-search` 让我也有 `web_search` / `web_fetch`、引导我配置 API keys（或配置我粘贴给你的 key）、并执行验证步骤。
+
+### 可选伴生包：`web_search` / `web_fetch`
+
+本包提供 `fused_search`、`fetch_page`、`deep_research`、`research_parallel`。轻量的 `web_search` / `web_fetch` 工具**不属于本仓库**——它们来自独立的 pi 包 [`@bytetrue/pi-web-search`](https://www.npmjs.com/package/@bytetrue/pi-web-search)，策略里的工具路由章节也引用了它们做快速单点查询。要获得同样的完整工具集，请安装：
+
+```bash
+pi install npm:@bytetrue/pi-web-search
+```
+
+> TUN 注意：如果使用 Clash/sing-box TUN 模式，`web_fetch` 需要在其 `src/html.ts` 里打同样的 fake-ip carve-out 补丁（`BYTE_PI_WEB_ALLOW_TUN_FAKEIP=0` 关闭）——这是 node_modules 补丁，包升级后要重打。详见[已知限制](#已知限制)。
 
 ---
 
@@ -140,6 +150,8 @@ pi remove git:github.com/Mr-remon219/pi-search-boost
 | `complexity` | `auto`/`simple`/`medium`/`complex` —— 预算层级覆盖 |
 
 查询风格：像 Grok Build 一样堆 3-6 个领域关键词加具体词。`site:example.com` 自动转成客户端 include 过滤；`"a" OR "b"` 自动拆成并行变体。
+
+可选伴生包 `@bytetrue/pi-web-search` 额外提供 `web_search`（单引擎查询）与 `web_fetch`（原始抓页）。
 
 ### TUI 命令
 
