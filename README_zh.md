@@ -1,95 +1,118 @@
 # pi-search-boost
 
-**pi（[earendil-works/pi-coding-agent](https://github.com/earendil-works/pi-coding-agent)）的网络搜索增强扩展——把 pi 的 web 搜索升级为多引擎融合、研究级能力：并行多引擎检索、深度研究循环、并行子 agent、focus 定向抓取、缓存与全量审计。**
+**面向 [pi](https://github.com/earendil-works/pi-coding-agent) 的搜索增强扩展——把 pi 的网络搜索变成多引擎、研究级的能力：融合多引擎检索、深度研究循环、并行子代理、聚焦过滤抓页、缓存与完整可审计性。**
 
-项目以 Grok Build / Claude Code / Codex 为参照，经过 22 轮实测迭代打磨。行为层由注入系统提示的 `<search_balance>` 主动搜索守则驱动，所有结论都有真实查询 + 审计日志硬证据。
-
----
-
-## 为什么需要它
-
-编码 agent 的默认 web 搜索通常是单引擎黑盒：无法交叉验证、无成本控制、不可观测，且模型要么少搜（凭过期记忆作答）要么滥搜（琐碎问题也搜）。pi-search-boost 逐一解决：
-
-- **五引擎融合检索** — Bing（免 key）+ Brave HTML（免 key）+ Tavily + Exa + Brave 并行；无 key 时也保持两个独立免费通道（Bing + Brave HTML）交叉验证
-- **x-algorithm 启发式排序** — 打分参数集中化（x-algorithm params.rs 风格）；每域名**软性多样性衰减**（同域第 N 条 × 0.7 降到 0.35 floor，硬上限 5 条）取代原来的 2 条硬截断——保留长尾结果同时防止单域名垄断，按 URL 去重，按"引擎一致性与域名质量"交叉打分。两个以上独立引擎同时命中 = 高置信；单引擎噪音自动降级。
-- **复杂度路由** — 搜索预算与查询复杂度绑定（Keiro / Adaptive-RAG 模式）：`simple` = 1 变体 × 2 引擎（1 credit）、`medium` = 2 × 3、`complex` = 3 × 4 + advanced 抽取（2 credits）。简单查询不再为深度研究买单。
-- **focus 定向抓取** — `fetch_page` 的 `focus` 参数只保留与查询相关的段落（Grok find_in_page / Anthropic dynamic filtering 模式）。实测 **省 95% token**（1136 词 → 61 词）。
-- **深度研究循环** — 检索 → 抓页 → 抽取 → 覆盖度检查 → 追问 → 收敛；逐来源佐证（关键声明需 ≥2 个独立域名）、时效感知。
-- **并行多 agent 研究** — 把问题拆成 2-4 个子任务，各自跑在独立 pi 子进程里（独立上下文、独立搜索预算），结果汇总交叉验证。
-- **缓存** — 搜索结果（6h）与页面（24h）落盘；热缓存 ~1ms，跨进程复用。
-- **审计与可观测性** — 每次搜索/抓取/研究事件全量落日志（JSONL，5MB 轮转），含 tier、credits 估算、引擎错误、耗时。TUI 内 `/search-audit`、`/search-cache` 命令。
-- **主动搜索守则** — agent 启动前注入 `<search_balance>` 规则：何时该搜（**疑问即搜**——"不确定/可能变了"就是触发信号，不是猜测的理由；另加事实/版本/时效/对比/陌生领域）、何时不搜（本地代码/纯创作/极稳定概念）、何时停（证据足够/同查询二次=循环/约 3 轮边际收益衰减）、自主兜底（修查询重试、curl 自抓、直接抓 URL、防注入）、**开发中触发**（写代码前搜索不确定的库 API/新依赖版本与替代品/变化过的语法/不认识的报错/技术栈最佳实践）。
+行为层由注入系统提示词的前摄搜索策略（`<search_balance>` 规则集）驱动。
 
 ---
 
-## 部署
+## 你能得到什么
 
-**这是 pi 的扩展——请直接用 pi 部署。** pi 会自动发现 `~/.pi/agent/extensions/` 下的扩展，部署 = 把文件放进去让 pi 加载。无需构建步骤、无需打包器、不需要任何其他 agent 框架（在 Claude Code / Codex 等环境中无法工作——工具通过 pi 的扩展 API 注册）。
+- **融合多引擎搜索** — Bing（免 key）+ Brave HTML（免 key）+ Tavily + Exa + Brave 并行；keyless 模式始终保留两个独立免费通道（Bing + Brave HTML）交叉验证
+- **跨引擎排序** — 按 URL 去重、按引擎共识与域名质量交叉排序，带每域名软多样性衰减；被 2+ 个独立引擎命中的结果是高置信，单引擎噪音被降权
+- **复杂度路由** — 搜索预算绑定查询复杂度：`simple` = 1 变体 × 2 引擎（1 credit）、`medium` = 2 × 3、`complex` = 3 × 4 + advanced 抽取（2 credits）
+- **聚焦过滤抓页** — `fetch_page` 的 `focus` 参数只保留与查询相关的段落（实测省 ~95% token）
+- **深度研究循环** — 检索 → 抓页 → 抽取 → 覆盖度检查 → 生成追问 → 收敛，带逐来源佐证（关键声明需 ≥2 个独立域名）
+- **并行多代理研究** — 把问题拆成 2-4 个子任务，每个作为独立 pi 子进程运行，各自有搜索预算
+- **缓存** — 搜索结果（6h）与页面（24h）落盘；热缓存命中 ~1ms，跨进程
+- **审计与可观测** — 每次搜索/抓页/研究事件都记 JSONL 日志（5MB 轮转），含层级、credits 估算、引擎错误、耗时；TUI 提供 `/search-audit` 与 `/search-cache` 命令
+- **前摄搜索策略** — 启动时注入 `<search_balance>` 规则集：何时默认搜索（任何一丝不确定），何时跳过，何时停止（约 3 轮收益递减），自治/兜底规则，以及写代码时的触发规则（对不确定的 API 先搜再写）
 
-### 前置要求
+---
 
-- **pi** 已安装：`https://github.com/earendil-works/pi-coding-agent`（任意较新版本）
-- Node.js 20+（或 Bun）——pi 的运行时
-- 可选：Tavily / Exa / Brave API key（免 key 模式不需要任何 key）
+## 安装——让 pi 来搞定
 
-### 第 1 步 — 安装文件（二选一）
+**前置**：已安装 pi（建议 v0.84 或更新；扩展用到 `pi.registerTool` 与 `before_agent_start` 系统提示词注入）。无需构建、无需打包。
 
-**方式 A：一键安装脚本（推荐）**
+### 方式 A：git 一键安装（推荐）
+
+无需 clone——pi 自动克隆仓库、注册进 `~/.pi/agent/settings.json`、并按 package 规则加载。
+
+```bash
+# 1. 先试用（不安装，临时目录跑一次）：
+pi -e git:github.com/Mr-remon219/pi-search-boost -p "fused_search 'tokio latest version'"
+
+# 2. 正式安装：
+pi install git:github.com/Mr-remon219/pi-search-boost
+```
+
+然后重启 pi 或执行 `/reload`。
+
+### 方式 B：clone 后本地安装
+
+```bash
+git clone https://github.com/Mr-remon219/pi-search-boost.git
+cd pi-search-boost
+pi install .
+```
+
+### 方式 C：手动复制（兜底——不用 pi 的包机制）
 
 ```bash
 # Windows
 install.bat
-
 # macOS / Linux
 chmod +x install.sh && ./install.sh
 ```
 
-脚本会把扩展复制到 `~/.pi/agent/extensions/search-boost/`，并可选注册你的 API key。
+复制到 `~/.pi/agent/extensions/search-boost/`（pi 自动发现该目录下的扩展）。
 
-**方式 B：手动复制**
+### 让 pi 帮你完成剩余配置
 
-```bash
-mkdir -p ~/.pi/agent/extensions/search-boost/lib
-cp index.ts ~/.pi/agent/extensions/search-boost/
-cp lib/*.ts ~/.pi/agent/extensions/search-boost/lib/
-```
+安装后，把下面这段话粘贴给 pi——agent 会读这份 README 并自己完成：
 
-### 第 2 步 — 在 pi 中加载
+> 请阅读这份 README 帮我完成配置：确认扩展已加载（search-audit stats）、引导我配置 API keys（或配置我粘贴给你的 key）、并执行验证步骤。
 
-重启 pi，或 TUI 内运行 `/reload`。四个工具（`fused_search`、`fetch_page`、`deep_research`、`research_parallel`）和两个命令（`/search-cache`、`/search-audit`）自动可用；`<search_balance>` 主动搜索守则会在 agent 启动时注入系统提示。
+---
 
-### 第 3 步 — 验证部署
+## API keys（可选——无 key 的 keyless 模式也能用）
 
-```bash
-# 快速冒烟测试（直接运行扩展，无需安装）：
-pi -ne -e ~/.pi/agent/extensions/search-boost/index.ts -p "fused_search 'tokio latest version'"
-
-# TUI 内这两个命令都应响应：
-/search-audit stats
-/search-cache stats
-```
-
-搜索后 `/search-audit` 能看到事件 = 部署生效。
-
-### 卸载
-
-```bash
-rm -rf ~/.pi/agent/extensions/search-boost
-```
-
-然后重启 pi。`~/.pi/agent/` 下的缓存与审计文件（`search-boost-cache.json`、`search-boost-audit.jsonl`）可一并删除。
-
-### API keys（可选）
-
-不配任何 key 也能用——**免 key 模式**（Bing HTML + Brave HTML + Jina Reader）。要满血请配置：
+Key 是**环境变量**（扩展不读 `.env` 文件）：
+- Windows：`setx PI_SEARCH_TAVILY_KEY "..."` —— 扩展会直接读 `HKCU\Environment`，所以 `setx` 无需重启进程即生效
+- macOS / Linux：`export PI_SEARCH_TAVILY_KEY="..."`（或写入 shell profile）
+- 或运行 `install.bat` / `install.sh` 交互输入
 
 | 变量 | 引擎 | 说明 |
 | --- | --- | --- |
-| `PI_SEARCH_TAVILY_KEY` | Tavily | agent 设计级搜索 API，质量最好（推荐）。每月 1000 免费 credits |
+| `PI_SEARCH_TAVILY_KEY` | Tavily | 为 agent 设计的搜索 API，质量最好（推荐）。1000 免费 credits/月 |
 | `PI_SEARCH_EXA_KEY` | Exa | 语义/神经检索，与关键词引擎互补 |
 | `PI_SEARCH_BRAVE_KEY` | Brave | 关键词 + 操作符 |
 | `PI_SEARCH_CACHE_TTL` | — | 搜索缓存秒数（默认 `21600`，6h） |
 | `PI_SEARCH_PAGE_TTL` | — | 页面缓存秒数（默认 `86400`，24h） |
+| `PI_SEARCH_ALLOW_TUN_FAKEIP` | — | 设为 `0` 关闭 Clash/sing-box TUN fake-ip carve-out（默认开启） |
+
+注册入口：[Tavily](https://tavily.com)（1000 免费 credits/月）· [Exa](https://exa.ai) · [Brave](https://brave.com/search/api/)
+
+---
+
+## 验证
+
+安装后（以及每次搜索后），这两个命令应有响应：
+
+```
+/search-audit stats    # 事件计数、引擎错误、层级分布、credits 估算
+/search-cache stats    # 缓存命中 / 条目
+```
+
+快速冒烟测试（直接跑扩展，无需安装）：
+
+```bash
+pi -ne -e git:github.com/Mr-remon219/pi-search-boost -p "fused_search 'tokio latest version'"
+```
+
+---
+
+## 更新 / 卸载
+
+```bash
+# 移动 pin 的 git ref 并 reconcile 检出：
+pi install git:github.com/Mr-remon219/pi-search-boost@main
+
+# 卸载：
+pi remove git:github.com/Mr-remon219/pi-search-boost
+```
+
+手动安装：重新运行 `install.bat`/`install.sh` 更新；`rm -rf ~/.pi/agent/extensions/search-boost` 卸载。
 
 ---
 
@@ -97,98 +120,99 @@ rm -rf ~/.pi/agent/extensions/search-boost
 
 | 工具 | 功能 |
 | --- | --- |
-| `fused_search` | 多引擎搜索：关键词变体 × 引擎并行 → URL 去重 → 跨引擎打分 → 带引擎来源/发布日期/全文内容的排序结果（Tavily advanced / Exa 的 content 可直接消费，跳过抓取） |
-| `fetch_page` | Reader 模式抓取：Jina Reader（免 key）→ 本地启发式抽取兜底 → 薄内容自动换 headless-browser 引擎。`focus` 参数只保留相关段落（省 80-95% token） |
-| `deep_research` | 多轮循环：覆盖度检查、逐来源佐证、一手来源优先、时效感知。`mode=step` 返回缺口 + 建议追问，由 agent 亲自驱动 |
-| `research_parallel` | 2-4 个独立子 agent（pi 子进程）各有搜索预算，并行执行，结果汇总交叉验证 |
+| `fused_search` | 多引擎搜索：关键词变体 × 引擎并行 → URL 去重 → 跨引擎打分 → 带引擎来源、发布日期与全文（Tavily advanced / Exa）的排序结果，可直接消费 |
+| `fetch_page` | Reader 模式抓页：Jina Reader（免 key）→ 本地启发式抽取兜底 → 薄页面走无头浏览器。`focus` 参数只保留相关段落（省 80-95% token） |
+| `deep_research` | 多轮循环：覆盖度检查、逐来源佐证、一手来源优先、时效性。`mode=step` 返回缺口与建议查询，供 agent 亲自驱动迭代 |
+| `research_parallel` | 2-4 个独立子代理（pi 子进程）各自带搜索预算，并行跑，最后交叉验证汇总 |
 
 ### fused_search 参数
 
 | 参数 | 说明 |
 | --- | --- |
 | `query` | 问题或主题 |
-| `queries` | 可选关键词变体（缺省自动派生） |
+| `queries` | 可选关键词变体（省略时自动派生） |
 | `engines` | 引擎子集：`bing`（免 key）、`bravehtml`（免 key）、`tavily`、`exa`、`brave` |
-| `max_results` | 融合结果上限（1-20，默认 10） |
-| `include_domains` / `exclude_domains` | 客户端硬过滤（引擎忽略 `site:` 操作符） |
-| `recency` | `day`/`week`/`month`/`year` — 有日期结果按半衰期指数衰减 |
-| `min_score` | 低于融合分阈值的直接丢弃 |
+| `max_results` | 最大融合结果数（1-20，默认 10） |
+| `include_domains` / `exclude_domains` | 客户端硬过滤域名（引擎忽略 `site:` 操作符） |
+| `recency` | `day`/`week`/`month`/`year` —— 带日期结果半衰期指数衰减 |
+| `min_score` | 丢弃低于融合分数下限的结果 |
 | `depth` | Tavily 深度：`basic`（1 credit）/ `advanced`（2 credits，查询对齐全文抽取） |
-| `complexity` | `auto`/`simple`/`medium`/`complex` — 预算档位覆盖 |
+| `complexity` | `auto`/`simple`/`medium`/`complex` —— 预算层级覆盖 |
 
-查询写法：像 Grok Build 一样堆 3-6 个领域关键词 + 具体术语。`site:example.com` 自动翻译为客户端 include 过滤；`"a" OR "b"` 自动拆成并行变体。
+查询风格：像 Grok Build 一样堆 3-6 个领域关键词加具体词。`site:example.com` 自动转成客户端 include 过滤；`"a" OR "b"` 自动拆成并行变体。
 
 ### TUI 命令
 
-- `/search-audit stats|recent|failures|domains|clear` — 审计分析：事件计数、抓取成功率、引擎错误、tier 分布、Tavily credits 估算、失败域名 Top
-- `/search-cache stats|clear` — 查看/清空缓存
+- `/search-audit stats|recent|failures|domains|clear` — 分析审计日志：事件计数、抓取成功率、引擎错误、层级分布、Tavily credits 估算、失败域名
+- `/search-cache stats|clear` — 查看或清空缓存
 
 ---
 
 ## 架构
 
 ```
-index.ts        工具注册（fused_search / fetch_page / deep_research /
-                research_parallel）、TUI 命令、<search_balance> 守则注入
-lib/engines.ts  引擎适配（Bing HTML 含跳转解码与结构变化检测、Tavily、Exa、
-                Brave）、查询预处理（site:/OR/引号）、复杂度路由、融合打分、时效衰减
-lib/extract.ts  Jina Reader + 本地启发式抽取 + headless-browser 兜底、
-                focus 段落过滤（动态过滤）、缓存
-lib/research.ts 深度研究循环：轮次、覆盖度、佐证、追问生成
-lib/parallel.ts 子 agent 编排：spawn pi 子进程（隔离/并发/超时/故障隔离）
+index.ts        工具注册（fused_search、fetch_page、deep_research、
+                research_parallel）、TUI 命令、<search_balance> 规则集注入
+lib/engines.ts  引擎适配（Bing HTML 带跳转解码与结构变化检测、Tavily、Exa、
+                Brave、Brave HTML）、查询预处理（site:/OR/引号）、复杂度路由、
+                跨引擎融合打分、recency 衰减
+lib/extract.ts  Jina Reader + 本地启发式抽取 + 无头浏览器兜底、聚焦段落过滤
+                （动态过滤）、缓存
+lib/research.ts 深度研究循环：轮次、覆盖度检查、佐证、追问生成
+lib/parallel.ts 子代理编排：spawn pi 子进程（隔离、并发、超时、故障隔离）
 lib/cache.ts    TTL JSON 缓存落盘（损坏自愈）
-lib/audit.ts    JSONL 审计日志（5MB 轮转、尾部读取）
-lib/util.ts     超时/信号 fetch、HTML 实体解码、URL 归一化、CJK 分词、并发池
+lib/audit.ts    JSONL 审计日志 5MB 轮转，tail 读取供 /search-audit
+lib/util.ts     带超时/信号的 fetch、HTML 解码、URL 归一化、CJK 感知分词、
+                有界并发池
 ```
 
 ### 设计来源（刻意借鉴）
 
-- **Jina Reader**（`r.jina.ai/<url>`，免 key markdown 抽取）— [OpenDeepResearcher](https://github.com/mshumer/OpenDeepResearcher) 同款
-- **Tavily 为默认搜索 API** — [langchain-ai/open_deep_research](https://github.com/langchain-ai/open_deep_research) 的选型
-- **搜到自信为止的研究循环** — OpenDeepResearcher 的 iterate-until-confident，改成工具内启发式 + `step` 模式让 LLM 驱动
-- **查询分解 + 逐条引用** — [GPT-Researcher](https://docs.gptr.dev/blog/building-gpt-researcher) 的 plan-and-solve
+- **Jina Reader**（`r.jina.ai/<url>`，免 key markdown 抽取）— 与 [OpenDeepResearcher](https://github.com/mshumer/OpenDeepResearcher) 同思路
+- **Tavily 作为默认搜索 API** — [langchain-ai/open_deep_research](https://github.com/langchain-ai/open_deep_research) 的选择
+- **迭代至确信的研究循环** — OpenDeepResearcher 的设计，改造成工具内启发式 + `step` 模式由 LLM 驱动
+- **查询分解 + 逐来源引用** — [GPT-Researcher](https://docs.gptr.dev/blog/building-gpt-researcher) 的 plan-and-solve 模式
 - **复杂度路由** — Keiro / [Adaptive-RAG](https://arxiv.org/abs/2403.14403)
-- **动态过滤** — Grok 的 `find_in_page` / Anthropic dynamic filtering 模式
-- **防过度搜索停止规则** — WWW'26 实证：约 3 轮后搜索边际收益锐减（over-search 是主要失败模式）
+- **动态过滤** — Grok 的 `find_in_page` / Anthropic 动态过滤模式
+- **前摄搜索停止规则** — WWW'26 证据：约 3 轮后搜索收益急剧衰减（过度搜索是主要失败模式）
 
 ---
 
-## 实测性能
+## 实测数据
 
 | 指标 | 数值 |
 | --- | --- |
 | 简单查询（1 变体 × 2 引擎） | ~1.0s |
 | 中等查询（2 × 3） | ~3.2s |
 | 复杂查询（3 × 4，advanced） | ~3.6s |
-| 深度研究单轮 | 9.8s 收敛（2 轮 source_cap） |
+| 深度研究一轮 | 9.8s 收敛（2 轮，source-cap） |
 | 热缓存命中 | 1-3ms |
-| focus 过滤 | 省 95% token（1136 → 61 词） |
+| 聚焦过滤 | 95% token 节省（1136 → 61 词） |
 | research_parallel（3 子任务） | ~65s 墙钟 |
-| 简单查询请求量 vs 平铺搜索 | 少 75% 请求、约一半 credits |
-
-### 验证方法
-
-每一轮迭代都用真实查询 + 审计日志验证（不是纸面声明）：引擎失败逐引擎记录带原因；tier/credits 估算在 `/search-audit stats` 可见；缓存命中跨进程计数。已知故障模式（Bing 挑战页、Jina 限流、DNS 污染环境）都能被检测并优雅降级——守则还教模型在工具失效时用 `curl` 兜底。
+| 简单查询请求量 vs 平铺搜索 | -75% 请求，约一半 credits |
 
 ---
 
 ## 已知限制
 
-- **X/Twitter 数据**：未接入（X API 已收费；guest token 抓取 2025 年起死亡）。实际用 Tavily/Exa 索引替代。
-- **模型内建触发**：搜索触发是策略驱动（系统提示），不是 RL 训练进模型。实测与主流 agent 的"模型自决触发"等价（所有主流 agent 都是模型自决，无一使用 server-side 自动触发）。
-- **Bing HTML 解析**：依赖 Bing 页面结构；结构变化会被检测并显式报错（绝不静默返回空结果）。
-- **无自建索引**：检索经 4 个引擎代理，没有本地全网索引。
+- **X/Twitter 数据**：不包含（X API 收费；guest-token 抓取 2025 年起已死）。用 Tavily/Exa 索引作为实际替代。
+- **模型原生触发**：搜索触发靠策略（系统提示词）驱动，不是 RL 训练进模型。
+- **Bing HTML 解析**：依赖 Bing 页面结构；结构变化会被检测并响亮失败（绝不静默返回空）。
+- **无自建索引**：检索走 4 个引擎代理，没有本地网页索引。
+- **免费通道有限流**：keyless 的 Brave HTML 通道在 IP 级限流下可能返回 429；失败会被审计记录并跳过该引擎（绝不静默返回空）。
 
 ---
 
-## 开发历程
+## 开发历史
 
-23 轮实测迭代：从单引擎 Bing 抓取 → 四引擎融合 + 复杂度路由 → focus 定向读取（省 95% token）→ 深度研究 + 佐证 → 并行子 agent → 主动搜索守则（v3：防过度搜索停止规则；v4：自主兜底规则）→ 最终审计（修复参数暴露与尾部读取 bug）→ **第 23 轮：TUN fake-ip 豁免（Clash TUN 把所有 DNS 答成 198.18/15；SSRF 判定现对「全 fake-ip 的主机名解析」放行，字面量私网/回环/metadata 仍拦，可用 `PI_SEARCH_ALLOW_TUN_FAKEIP=0` 关闭）+ 双守则合并（主动搜索规则收敛为单一 `<search_balance>` 并新增工具路由段，独立 web-search-guidance 扩展退役）**。
-> 注意：Clash/sing-box TUN 用户不打此补丁时，`fetch_page`/`web_fetch` 会对每个真实 URL 报 "resolves to private IP 198.18.0.x"。
+23 轮实测迭代（详见仓库提交历史）：单引擎 Bing 抓取 → 4 引擎融合 + 复杂度路由 → 聚焦过滤抓页（95% token 节省）→ 带佐证的深度研究 → 并行子代理 → 前摄搜索策略（v3：反过度搜索停止规则；v4：自治/兜底规则）→ 审计修复 → **第 23 轮：TUN fake-ip carve-out（Clash TUN 对每个 DNS 查询都回 198.18/15；SSRF 防护现在允许全 fake-ip 主机名解析，但字面私网 IP / 回环 / metadata 仍被拦截；可用 `PI_SEARCH_ALLOW_TUN_FAKEIP=0` 关闭）+ 单策略合并（前摄搜索规则集去重合并为一个带显式工具路由章节的 `<search_balance>`；独立的 web-search-guidance 扩展退役）。**
+> Clash/sing-box TUN 用户注意：没有这个修复，`fetch_page` 会对每个真实 URL 报 "resolves to private IP 198.18.0.x"。如果你同时装了 `@bytetrue/pi-web-search` 包，它自带的 `web_fetch` 有同样的防护，需要在 `src/html.ts` 里打同样的 carve-out 补丁（`assertPublicResolution`，用 `BYTE_PI_WEB_ALLOW_TUN_FAKEIP=0` 关闭）——这是 node_modules 补丁，包升级后要重打。
 
-## 友链
+---
 
-- [Linux.do](https://linux.do/) — 友好的中文技术社区
+## 朋友们
+
+- [Linux.do](https://linux.do/) — 一个友好的中文技术社区
 
 ## License
 
