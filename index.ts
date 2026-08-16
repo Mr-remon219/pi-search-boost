@@ -29,7 +29,7 @@ import { runResearch } from "./lib/research.ts";
 import { runParallelResearch } from "./lib/parallel.ts";
 import { runXTool, xAuthAvailableSync, type XSearchType } from "./lib/xsearch.ts";
 import { fallbackXSearch, hitToPost } from "./lib/xfallback.ts";
-import { authStatus, importFromGrok, importApiKey, jwtTier, piAuthPath, tierName } from "./lib/xauth.ts";
+import { authStatus, importFromGrok, importApiKey, jwtTier, logout, piAuthPath, tierName } from "./lib/xauth.ts";
 import { countWords, hostOf } from "./lib/util.ts";
 
 export default function searchBoostExtension(pi: ExtensionAPI) {
@@ -926,6 +926,25 @@ During coding / development work, search BEFORE you write — never write code a
 				ctx.ui.notify("usage: /x-login | /x-login -k <XAI_API_KEY> | /x-login status", "info");
 			} catch (err) {
 				ctx.ui.notify(`x-login failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+			}
+		},
+	});
+
+	pi.registerCommand("x-logout", {
+		description:
+			"Remove pi-local xAI credentials: the official hosted x_search path is disabled and x_search falls back to the multi-engine / guest-GraphQL / oEmbed chain. grok CLI's own login is untouched. Usage: /x-logout",
+		handler: async (_args, ctx) => {
+			const removed = logout();
+			if (removed) {
+				ctx.ui.notify(
+					`x-logout: pi-local credentials removed — x_search now uses the multi-engine / guest-GraphQL / oEmbed fallback chain only.\nRun /x-login to re-enable the official hosted x_search path. (grok CLI's own login is untouched.)`,
+					"info",
+				);
+			} else {
+				ctx.ui.notify(
+					`x-logout: no pi-local credentials found — x_search is already on the fallback chain. Run /x-login to enable the official path.`,
+					"info",
+				);
 			}
 		},
 	});
