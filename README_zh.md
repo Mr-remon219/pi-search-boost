@@ -108,7 +108,7 @@ rm -rf ~/.pi/agent/extensions/search-boost
 | --- | --- |
 | `query` | 问题或主题 |
 | `queries` | 可选关键词变体（缺省自动派生） |
-| `engines` | 引擎子集：`bing`、`tavily`、`exa`、`brave` |
+| `engines` | 引擎子集：`bing`（免 key）、`bravehtml`（免 key）、`tavily`、`exa`、`brave` |
 | `max_results` | 融合结果上限（1-20，默认 10） |
 | `include_domains` / `exclude_domains` | 客户端硬过滤（引擎忽略 `site:` 操作符） |
 | `recency` | `day`/`week`/`month`/`year` — 有日期结果按半衰期指数衰减 |
