@@ -22,7 +22,7 @@ import { Type } from "typebox";
 
 import { JsonCache } from "./lib/cache.ts";
 import { AuditLog, type AuditFetchEvent, type AuditXSearchEvent } from "./lib/audit.ts";
-import { availableEngines, fusedSearch } from "./lib/engines.ts";
+import { availableEngines, fusedSearch, hasApiSearchKeys } from "./lib/engines.ts";
 import { excerptForTool, fetchPage } from "./lib/extract.ts";
 import { LAYER_LABELS, getLayer, setLayer } from "./lib/layer.ts";
 import { runResearch } from "./lib/research.ts";
@@ -991,8 +991,25 @@ During coding / development work, search BEFORE you write — never write code a
 			}
 			if (cmd === "show" || cmd === "") {
 				const available = availableEngines();
+				const hints: string[] = [];
+				if (current === "api" && available.length === 0) {
+					hints.push(
+						"no API keys detected — fused_search will fall back to exa-free per query, or run /web_change free for the keyless layer",
+					);
+					hints.push("set PI_SEARCH_TAVILY_KEY / PI_SEARCH_BRAVE_KEY / PI_SEARCH_EXA_KEY, then /web_change api");
+				}
+				if (current === "free") {
+					hints.push("keyless single-engine mode — run /web_change api after configuring keys for multi-engine fusion");
+				}
+				if (!hasApiSearchKeys() && current === "api") {
+					hints.push("tip: with no keys configured, /web_change free avoids the per-query fallback warning");
+				}
 				ctx.ui.notify(
-					`web layer: ${current} — ${LAYER_LABELS[current]}\nengines available in this layer: ${available.join(", ") || "(none — no API keys configured)"}`,
+					[
+						`web layer: ${current} — ${LAYER_LABELS[current]}`,
+						`engines available in this layer: ${available.join(", ") || "(none — no API keys configured)"}`,
+						...hints,
+					].join("\n"),
 					"info",
 				);
 				return;

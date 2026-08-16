@@ -111,6 +111,11 @@ export function availableEngines(): string[] {
 	return list;
 }
 
+/** True when at least one api-layer search key is configured (env or Windows user hive). */
+export function hasApiSearchKeys(): boolean {
+	return !!(env(ENGINE_KEYS.tavily) || env(ENGINE_KEYS.exa) || env(ENGINE_KEYS.brave));
+}
+
 /* ------------------------------ Complexity routing ----------------------------- */
 
 /**

@@ -6,8 +6,9 @@
  *   - "free": keyless Exa MCP (web_search_exa on mcp.exa.ai) — single engine
  *   - "api" : Tavily + Brave + Exa API keys — the multi-engine fused route
  *
- * The choice persists to disk so it survives reloads; the api layer is the
- * default (preserves the pre-layer behavior exactly).
+ * The choice persists to disk so it survives reloads. With no saved preference,
+ * defaults to `api` when search API keys are configured, otherwise `free`
+ * (keyless Exa MCP) so first-time users can search without setup.
  *
  * No pi-package imports here (AGENTS.md contract: lib/ imports only each other
  * + node built-ins). The state file mirrors pi's getAgentDir() resolution:
@@ -16,6 +17,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { hasApiSearchKeys } from "./engines.ts";
 
 export type WebLayer = "free" | "api";
 
@@ -52,9 +54,9 @@ export function getLayer(): WebLayer {
 			return cached;
 		}
 	} catch {
-		/* no state file yet — default api */
+		/* no state file yet — pick a sensible default */
 	}
-	return cached ?? "api";
+	return cached ?? (hasApiSearchKeys() ? "api" : "free");
 }
 
 export function setLayer(layer: WebLayer): WebLayer {

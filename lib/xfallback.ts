@@ -420,7 +420,7 @@ export async function fallbackXSearch(params: {
 
 	// ---- thread: oEmbed single post (engines cannot reconstruct a thread) ----
 	if (params.type === "thread") {
-		const id = params.post_id?.match(/(?:status\/)?(\d{5,})/)?.[1];
+		const id = params.post_id?.match(/(?:status\/)?(\d+)/)?.[1];
 		if (!id) throw new Error("fallback thread requires post_id");
 		const post = await oembedPost(id, signal);
 		return { type: "thread", data: post ? [post] : [], via: "oembed" };

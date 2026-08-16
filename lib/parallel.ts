@@ -57,7 +57,7 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
 }
 
 /** Resolve next to this package's index.ts (works for npm, git, and manual installs). */
-const SEARCH_BOOST_EXT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "index.ts");
+export const SEARCH_BOOST_EXT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "index.ts");
 
 function buildSubtaskPrompt(subtask: string, maxSources: number): string {
 	return [
