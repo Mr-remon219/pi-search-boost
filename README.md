@@ -4,6 +4,18 @@
 
 The behavior layer is guided by a proactive-search policy (the `<search_balance>` ruleset) injected into the system prompt on agent start.
 
+> **search-boost family**
+>
+> | Project | For | Link |
+> |---------|-----|------|
+> | [**search-boost**](https://github.com/Mr-remon219/search-boost) | Cursor · Codex · Claude · Grok · Antigravity via MCP | [GitHub](https://github.com/Mr-remon219/search-boost) · [npm](https://www.npmjs.com/package/search-boost-mcp) |
+> | [**dsh-search-boost**](https://github.com/Mr-remon219/dsh-search-boost) | [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) bundle plugin | [GitHub](https://github.com/Mr-remon219/dsh-search-boost) · [npm](https://www.npmjs.com/package/dsh-search-boost) |
+> | [**pi-search-boost**](https://github.com/Mr-remon219/pi-search-boost) *(this repo)* | [pi](https://github.com/earendil-works/pi-coding-agent) extension | you are here |
+
+On the **free** layer, keyless Exa MCP runs alone; the **api** layer fuses Tavily, Brave, and Exa in parallel when keys are configured (one key is enough; all three recommended for best fusion). Switch layers with `/web_change`.
+
+中文文档 → [README_zh.md](./README_zh.md)
+
 ---
 
 ## What you get
@@ -275,10 +287,8 @@ lib/util.ts     fetch with timeout/signal, HTML decoding, URL normalization, CJK
 
 ---
 
-## Friends
-
-- [Linux.do](https://linux.do/) — a friendly Chinese tech community
-
 ## License
 
 MIT
+
+**Links:** [Issues](https://github.com/Mr-remon219/pi-search-boost/issues) · [search-boost](https://github.com/Mr-remon219/search-boost) · [dsh-search-boost](https://github.com/Mr-remon219/dsh-search-boost) · [Linux.do](https://linux.do/)

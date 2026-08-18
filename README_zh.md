@@ -4,6 +4,18 @@
 
 行为层由注入系统提示词的前摄搜索策略（`<search_balance>` 规则集）驱动。
 
+> **search-boost 系列**
+>
+> | 项目 | 用在哪 | 链接 |
+> |------|--------|------|
+> | [**search-boost**](https://github.com/Mr-remon219/search-boost) | Cursor · Codex · Claude · Grok · Antigravity | [GitHub](https://github.com/Mr-remon219/search-boost) · [npm](https://www.npmjs.com/package/search-boost-mcp) |
+> | [**dsh-search-boost**](https://github.com/Mr-remon219/dsh-search-boost) | [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) | [GitHub](https://github.com/Mr-remon219/dsh-search-boost) · [npm](https://www.npmjs.com/package/dsh-search-boost) |
+> | [**pi-search-boost**](https://github.com/Mr-remon219/pi-search-boost)（本仓库） | [pi](https://github.com/earendil-works/pi-coding-agent) | 当前仓库 |
+
+**free** 层为 keyless Exa MCP 单引擎；**api** 层在配置 key 后并行融合 Tavily、Brave、Exa（配一个即可；建议配齐三个）。用 `/web_change` 切换。
+
+English → [README.md](./README.md)
+
 ---
 
 ## 你能得到什么
@@ -249,3 +261,9 @@ lib/util.ts     带超时/信号的 fetch、HTML 解码、URL 归一化、CJK �
 
 23 轮实测迭代（详见仓库提交历史）：单引擎 Bing 抓取 → 4 引擎融合 + 复杂度路由 → 聚焦过滤抓页（95% token 节省）→ 带佐证的深度研究 → 并行子代理 → 前摄搜索策略（v3：反过度搜索停止规则；v4：自治/兜底规则）→ 审计修复 → **第 23 轮：TUN fake-ip carve-out（Clash TUN 对每个 DNS 查询都回 198.18/15；SSRF 防护现在允许全 fake-ip 主机名解析，但字面私网 IP / 回环 / metadata 仍被拦截；可用 `PI_SEARCH_ALLOW_TUN_FAKEIP=0` 关闭）+ 单策略合并（前摄搜索规则集去重合并为一个带显式工具路由章节的 `<search_balance>`；独立的 web-search-guidance 扩展退役）。**
 > Clash/sing-box TUN 用户注意：没有这个修复，`fetch_page` 会对每个真实 URL 报 "resolves to private IP 198.18.0.x"。
+
+## License
+
+MIT
+
+**相关链接：** [Issues](https://github.com/Mr-remon219/pi-search-boost/issues) · [search-boost](https://github.com/Mr-remon219/search-boost) · [dsh-search-boost](https://github.com/Mr-remon219/dsh-search-boost) · [Linux.do](https://linux.do/)
