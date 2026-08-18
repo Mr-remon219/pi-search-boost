@@ -2,7 +2,7 @@
  * xfallback — fallback for x_search, entirely on the multi-engine route.
  *
  * Every search goes through the fused multi-engine router (the user's
- * configured api layer — Tavily/Brave/Exa — or the free layer's exa-free),
+ * configured api layer — Tavily/Brave/Exa/TinyFish — or the free layer's exa-free),
  * restricted to x.com / twitter.com. No Bing/DDG HTML parsing.
  *
  * Routing:

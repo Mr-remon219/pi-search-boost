@@ -3,12 +3,15 @@
  *
  * Two layers, switched at runtime via `/web_change` (see lib/layer.ts):
  *  - free: keyless Exa MCP (`web_search_exa` on mcp.exa.ai) — the only engine
- *  - api : Tavily + Brave + Exa API routes (list below)
+ *  - api : Tavily + Brave + Exa + TinyFish API routes (list below)
  *
  * Engines (api layer):
- *  - tavily  : agent-designed search API (PI_SEARCH_TAVILY_KEY) — langchain-ai's default choice
- *  - exa     : neural/semantic search (PI_SEARCH_EXA_KEY)
- *  - brave   : keyword search with operators (PI_SEARCH_BRAVE_KEY)
+ *  - tavily   : agent-designed search API (PI_SEARCH_TAVILY_KEY) — langchain-ai's default choice
+ *  - exa      : neural/semantic search (PI_SEARCH_EXA_KEY)
+ *  - brave    : keyword search with operators (PI_SEARCH_BRAVE_KEY)
+ *  - tinyfish   : free web search over a traditional index (PI_SEARCH_TINYFISH_KEY)
+ *
+ * The tinyfish key falls back to TINYFISH_API_KEY (the official SDK variable)
  *
  * Fused search: query variants x engines in parallel, then URL-level dedupe
  * and cross-engine scoring (rank weight + cross-engine bonus + domain quality).
@@ -99,7 +102,17 @@ export const ENGINE_KEYS: Record<string, string> = {
 	tavily: "PI_SEARCH_TAVILY_KEY",
 	exa: "PI_SEARCH_EXA_KEY",
 	brave: "PI_SEARCH_BRAVE_KEY",
+	tinyfish: "PI_SEARCH_TINYFISH_KEY",
 };
+
+/**
+ * TinyFish key resolution: the PI_SEARCH_-prefixed name wins (project namespace),
+ * then the official TINYFISH_API_KEY used by @tiny-fish/sdk and pi-tinyfish —
+ * so existing TinyFish users get fusion without re-configuring anything.
+ */
+export function tinyfishApiKey(): string | undefined {
+	return env(ENGINE_KEYS.tinyfish) ?? env("TINYFISH_API_KEY");
+}
 
 export function availableEngines(): string[] {
 	// free layer: Exa MCP is keyless and always available — that's the whole layer
@@ -108,12 +121,16 @@ export function availableEngines(): string[] {
 	if (env(ENGINE_KEYS.tavily)) list.push("tavily");
 	if (env(ENGINE_KEYS.exa)) list.push("exa");
 	if (env(ENGINE_KEYS.brave)) list.push("brave");
+	if (tinyfishApiKey()) list.push("tinyfish");
 	return list;
 }
 
 /** True when at least one api-layer search key is configured (env or Windows user hive). */
 export function hasApiSearchKeys(): boolean {
-	return !!(env(ENGINE_KEYS.tavily) || env(ENGINE_KEYS.exa) || env(ENGINE_KEYS.brave));
+	return !!(
+		env(ENGINE_KEYS.tavily) || env(ENGINE_KEYS.exa) ||
+		env(ENGINE_KEYS.brave) || tinyfishApiKey()
+	);
 }
 
 /* ------------------------------ Complexity routing ----------------------------- */
@@ -122,9 +139,9 @@ export function hasApiSearchKeys(): boolean {
  * Complexity-aware routing (Keiro/Adaptive-RAG pattern): bind the search budget
  * to the query's complexity instead of paying the max for every query.
  *   api layer:
- *     simple  -> 1 variant x 2 engines (tavily basic + brave, 1 credit)
- *     medium  -> 2 variants x 3 engines (tavily basic + brave + exa)
- *     complex -> 3 variants x 3 engines (tavily advanced + brave + exa, 2 credits)
+ *     simple  -> 1 variant x 3 engines (tavily basic + brave + tinyfish, 1 credit)
+ *     medium  -> 2 variants x 4 engines (tavily basic + brave + exa + tinyfish)
+ *     complex -> 3 variants x 4 engines (tavily advanced + brave + exa + tinyfish, 2 credits)
  *   free layer (exa-free keyless, single engine; tiers differ in variants only):
  *     simple  -> 1 variant, medium -> 2, complex -> 3
  */
@@ -145,11 +162,12 @@ export function estimateComplexity(query: string): Complexity {
 }
 
 const TIER_ENGINES: Record<WebLayer, Record<Complexity, string[]>> = {
-	// api layer: keyed engines only; engines missing their key are dropped at call time
+	// api layer: keyed engines only; engines missing their key are dropped at call time.
+	// tinyfish is free (no credits), so it joins every tier without cost — only latency.
 	api: {
-		simple: ["tavily", "brave"],
-		medium: ["tavily", "brave", "exa"],
-		complex: ["tavily", "brave", "exa"],
+		simple: ["tavily", "brave", "tinyfish"],
+		medium: ["tavily", "brave", "exa", "tinyfish"],
+		complex: ["tavily", "brave", "exa", "tinyfish"],
 	},
 	// free layer: Exa MCP is the only engine; tiers only vary the variant count
 	free: {
@@ -238,11 +256,11 @@ export function parseDate(raw: string | null | undefined): string | null {
 
 /* ---------------------------------- Tavily ----------------------------------- */
 
-const RECENCY_TO_PARAM: Record<string, { tavily: "day" | "week" | "month" | "year"; brave: "pd" | "pw" | "pm" | "py"; days: number }> = {
-	day: { tavily: "day", brave: "pd", days: 1 },
-	week: { tavily: "week", brave: "pw", days: 7 },
-	month: { tavily: "month", brave: "pm", days: 30 },
-	year: { tavily: "year", brave: "py", days: 365 },
+const RECENCY_TO_PARAM: Record<string, { tavily: "day" | "week" | "month" | "year"; brave: "pd" | "pw" | "pm" | "py"; days: number; minutes: number }> = {
+	day: { tavily: "day", brave: "pd", days: 1, minutes: 1440 },
+	week: { tavily: "week", brave: "pw", days: 7, minutes: 10080 },
+	month: { tavily: "month", brave: "pm", days: 30, minutes: 43200 },
+	year: { tavily: "year", brave: "py", days: 365, minutes: 525600 },
 };
 
 export interface EngineQueryOptions {
@@ -368,6 +386,55 @@ async function searchBrave(query: string, count: number, o: EngineQueryOptions =
 			title: collapseSpace(r.title ?? ""),
 			url: r.url!,
 			snippet: collapseSpace(r.description ?? ""),
+		}));
+}
+
+/* --------------------------------- TinyFish ----------------------------------- */
+
+/**
+ * TinyFish Search — free web search over a traditional web index (residential
+ * IPs). Complements Exa's neural index: strong where exact terms matter and
+ * the semantic engines drift. Search is free at any wallet balance (it never
+ * draws from it) and rate-limited at 30 req/min — one fused_search fires at
+ * most 3 tinyfish requests (tier variant count), well inside the budget.
+ *
+ * Native include_domains/exclude_domains (comma-separated) and last_n_minutes
+ * params, so no site:-operator folding is needed (that syntax is deprecated
+ * on TinyFish). No content/published fields: like brave, tinyfish contributes
+ * rank + snippet signal only.
+ */
+/** Query-string construction for the TinyFish Search API (exported for offline tests). */
+export function buildTinyfishParams(query: string, o: EngineQueryOptions = {}): URLSearchParams {
+	const params = new URLSearchParams({ query });
+	if (o.includeDomains?.length) params.set("include_domains", o.includeDomains.slice(0, 5).join(","));
+	if (o.excludeDomains?.length) params.set("exclude_domains", o.excludeDomains.slice(0, 5).join(","));
+	if (o.recency && RECENCY_TO_PARAM[o.recency]) {
+		params.set("last_n_minutes", String(RECENCY_TO_PARAM[o.recency].minutes));
+	}
+	return params;
+}
+
+async function searchTinyfish(query: string, count: number, o: EngineQueryOptions = {}): Promise<RawHit[]> {
+	const key = tinyfishApiKey()!;
+	const resp = await fetch(`https://agent.tinyfish.ai/v1/search?${buildTinyfishParams(query, o)}`, {
+		headers: { "X-API-Key": key, Accept: "application/json" },
+		signal: AbortSignal.timeout(15000),
+	});
+	if (!resp.ok) {
+		// 402 = Search API not enabled for the account; 429 = the 30 req/min cap
+		const hint = resp.status === 429 ? " (rate-limited, 30 req/min) — retry shortly" : "";
+		throw new Error(`tinyfish http ${resp.status}${hint}`);
+	}
+	const json = (await resp.json()) as {
+		results?: Array<{ title?: string; url?: string; snippet?: string }>;
+	};
+	return (json.results ?? [])
+		.filter((r) => r.url)
+		.slice(0, count)
+		.map((r) => ({
+			title: collapseSpace(r.title ?? ""),
+			url: r.url!,
+			snippet: collapseSpace(r.snippet ?? "").slice(0, 240),
 		}));
 }
 
@@ -517,6 +584,7 @@ const ENGINE_FNS: Record<string, (q: string, n: number, o?: EngineQueryOptions) 
 	tavily: searchTavily,
 	exa: searchExa,
 	brave: searchBrave,
+	tinyfish: searchTinyfish,
 	"exa-free": searchExaFree,
 };
 
@@ -595,7 +663,7 @@ const SCORE_PARAMS = {
 	domainHardCap: 5,
 };
 
-const ENGINE_WEIGHT: Record<string, number> = { tavily: 1.2, exa: 1.2, brave: 1.1, "exa-free": 1.0 };
+const ENGINE_WEIGHT: Record<string, number> = { tavily: 1.2, exa: 1.2, brave: 1.1, tinyfish: 1.1, "exa-free": 1.0 };
 
 export function domainBonus(domain: string, includeDomains: string[] = []): number {
 	// Caller explicitly restricted to this domain (e.g. x_search site:x.com) —

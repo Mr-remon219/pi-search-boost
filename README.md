@@ -12,7 +12,7 @@ The behavior layer is guided by a proactive-search policy (the `<search_balance>
 > | [**dsh-search-boost**](https://github.com/Mr-remon219/dsh-search-boost) | [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) bundle plugin | [GitHub](https://github.com/Mr-remon219/dsh-search-boost) · [npm](https://www.npmjs.com/package/dsh-search-boost) |
 > | [**pi-search-boost**](https://github.com/Mr-remon219/pi-search-boost) *(this repo)* | [pi](https://github.com/earendil-works/pi-coding-agent) extension | you are here |
 
-On the **free** layer, keyless Exa MCP runs alone; the **api** layer fuses Tavily, Brave, and Exa in parallel when keys are configured (one key is enough; all three recommended for best fusion). Switch layers with `/web_change`.
+On the **free** layer, keyless Exa MCP runs alone; the **api** layer fuses Tavily, Brave, Exa, and TinyFish in parallel when keys are configured (one is enough; TinyFish is free — more engines means better cross-engine agreement). Switch layers with `/web_change`.
 
 中文文档 → [README_zh.md](./README_zh.md)
 
@@ -20,9 +20,9 @@ On the **free** layer, keyless Exa MCP runs alone; the **api** layer fuses Tavil
 
 ## What you get
 
-- **Fused multi-engine search** — Tavily + Brave API + Exa in parallel (HTML scrapers retired)
+- **Fused multi-engine search** — Tavily + Brave API + Exa + TinyFish in parallel (HTML scrapers retired)
 - **Cross-engine ranking** — deduplicated by URL, cross-ranked by engine agreement and domain quality, with per-domain soft diversity decay; a result found by 2+ independent engines is high-confidence, single-engine noise is demoted
-- **Complexity routing** — search budget bound to query complexity: `simple` = 1 variant × 2 engines (Tavily + Brave, 1 credit), `medium`/`complex` = 2–3 variants × Tavily + Brave + Exa (`complex` uses Tavily advanced, 2 credits)
+- **Complexity routing** — search budget bound to query complexity: `simple` = 1 variant × 3 engines (Tavily + Brave + TinyFish, 1 credit), `medium`/`complex` = 2–3 variants × Tavily + Brave + Exa + TinyFish (`complex` uses Tavily advanced, 2 credits)
 - **Focus-filtered page reading** — `fetch_page` with a `focus` parameter keeps only query-relevant paragraphs (measured ~95% token savings)
 - **Deep research loop** — search → fetch → extract → coverage check → follow-up queries → converge, with per-source corroboration (≥2 independent domains for key claims)
 - **Parallel multi-agent research** — decompose a question into 2-4 subtasks, each run as an independent pi subprocess with its own search budget
@@ -94,17 +94,17 @@ Once installed, paste this into a pi session — the agent reads this README and
 
 ## Search layers: `/web_change`
 
-Two layers, switched at runtime (persisted to `~/.pi/agent/search-boost-layer.json`). **Default:** `api` when Tavily/Brave/Exa keys are configured, otherwise `free` (keyless — works out of the box):
+Two layers, switched at runtime (persisted to `~/.pi/agent/search-boost-layer.json`). **Default:** `api` when any search key (Tavily/Brave/Exa/TinyFish) is configured, otherwise `free` (keyless — works out of the box):
 
 | Layer | Engines | Keys | Notes |
 | --- | --- | --- | --- |
-| `api` | Tavily + Brave + Exa API | `PI_SEARCH_TAVILY_KEY`, `PI_SEARCH_EXA_KEY`, `PI_SEARCH_BRAVE_KEY` | Multi-engine fusion, cross-engine scoring active |
+| `api` | Tavily + Brave + Exa + TinyFish API | `PI_SEARCH_TAVILY_KEY`, `PI_SEARCH_EXA_KEY`, `PI_SEARCH_BRAVE_KEY`, `PI_SEARCH_TINYFISH_KEY` | Multi-engine fusion, cross-engine scoring active; engines without a key are skipped |
 | `free` | `exa-free` (keyless Exa MCP, `mcp.exa.ai`) | none | Single engine, no fusion cross-check, ~2-3s/call, may 429; 429 hint suggests switching back to `api` |
 
 ```
 /web_change          # show current layer + available engines
 /web_change free     # keyless Exa MCP, single engine
-/web_change api      # tavily + brave + exa multi-engine fusion
+/web_change api      # tavily + brave + exa + tinyfish multi-engine fusion
 ```
 
 The choice is read at every `fused_search` call, so `deep_research` and `research_parallel` inherit the active layer automatically.
@@ -123,11 +123,12 @@ Keys are **environment variables** (the extension does not read `.env` files):
 | `PI_SEARCH_TAVILY_KEY` | Tavily | Agent-designed search API; best quality (recommended). 1000 free credits/mo |
 | `PI_SEARCH_EXA_KEY` | Exa | Semantic / neural search; complements keyword engines |
 | `PI_SEARCH_BRAVE_KEY` | Brave | Keyword search with operators |
+| `PI_SEARCH_TINYFISH_KEY` | TinyFish | Free web search (30 req/min, no credits) — cheapest way to light up the api layer; complements Exa. Falls back to `TINYFISH_API_KEY` (the official SDK variable) if unset |
 | `PI_SEARCH_CACHE_TTL` | — | Search cache TTL in seconds (default `21600`, 6h) |
 | `PI_SEARCH_PAGE_TTL` | — | Page cache TTL in seconds (default `86400`, 24h) |
 | `PI_SEARCH_ALLOW_TUN_FAKEIP` | — | Set to `0` to disable the Clash/sing-box TUN fake-ip carve-out (default enabled) |
 
-Key registration: [Tavily](https://tavily.com) (1000 free credits/mo) · [Exa](https://exa.ai) · [Brave](https://brave.com/search/api/)
+Key registration: [Tavily](https://tavily.com) (1000 free credits/mo) · [Exa](https://exa.ai) · [Brave](https://brave.com/search/api/) · [TinyFish](https://tinyfish.ai) (search free)
 
 ---
 
@@ -178,7 +179,7 @@ Manual installs: update by re-running `install.bat`/`install.sh`; uninstall with
 | --- | --- |
 | `query` | The question or topic |
 | `queries` | Optional keyword variants (auto-derived if omitted) |
-| `engines` | Subset override: `tavily`, `exa`, `brave` (api layer) or `exa-free` (free layer); default = active layer's engines |
+| `engines` | Subset override: `tavily`, `exa`, `brave`, `tinyfish` (api layer) or `exa-free` (free layer); default = active layer's engines |
 | `max_results` | Max fused results (1-20, default 10) |
 | `include_domains` / `exclude_domains` | Hard client-side domain filters (engines ignore `site:` operators) |
 | `recency` | `day`/`week`/`month`/`year` — half-life exponential decay for dated results |
@@ -206,7 +207,7 @@ Credentials: `/x-login` imports your grok login into pi's own directory (`~/.pi/
 
 ### TUI commands
 
-- `/web_change [free|api|show]` — switch the search layer (free = keyless Exa MCP single engine; api = tavily+brave+exa fusion)
+- `/web_change [free|api|show]` — switch the search layer (free = keyless Exa MCP single engine; api = tavily+brave+exa+tinyfish fusion)
 - `/x-login [|-k <XAI_API_KEY>|status]` — import xAI credentials into pi's own directory for x_search (bare = from your grok login; `-k` = API key; `status` = show the credential chain)
 - `/x-logout` — remove pi-local credentials: the official hosted x_search path is disabled, x_search falls back to the multi-engine / guest-GraphQL / oEmbed chain only (grok CLI's own login is untouched; `/x-login` re-enables the official path)
 - `/search-audit stats|recent|failures|domains|clear` — analyze the audit log: event counts, fetch success rates, engine errors, tier distribution, Tavily credit estimate, failing domains
@@ -220,7 +221,7 @@ Credentials: `/x-login` imports your grok login into pi's own directory (`~/.pi/
 index.ts        Tool registrations (fused_search, fetch_page, deep_research,
                 research_parallel, x_search), TUI commands, <search_balance> ruleset
                 injection
-lib/engines.ts  Engine adapters (Tavily, Exa, Brave API, exa-free MCP), query preprocessing
+lib/engines.ts  Engine adapters (Tavily, Exa, Brave API, TinyFish, exa-free MCP), query preprocessing
                 (site:/OR/quotes), complexity routing, cross-engine fusion scoring,
                 recency decay
 lib/xsearch.ts  x_search primary path: pi POSTs the Responses API directly (hosted
@@ -276,7 +277,7 @@ lib/util.ts     fetch with timeout/signal, HTML decoding, URL normalization, CJK
 - **X/Twitter live data**: the hosted x_search path needs grok login or `XAI_API_KEY`; without credentials, `x_search` uses multi-engine + guest GraphQL + oEmbed fallbacks (indexed posts, not the full firehose).
 - **Model-native triggering**: search triggering is policy-driven (system prompt), not RL-trained into the model.
 - **No self-hosted index**: retrieval is proxied via Tavily / Brave / Exa / Exa MCP; there is no local index of the web.
-- **API keys for fusion**: the `api` layer needs Tavily/Brave/Exa keys for multi-engine fusion; the `free` layer needs none but is a single keyless engine (Exa MCP) that can rate-limit (429) — switch with `/web_change api` once keys are configured.
+- **API keys for fusion**: the `api` layer needs at least one of Tavily/Brave/Exa/TinyFish keys for multi-engine fusion (TinyFish is free — the zero-cost entry point); the `free` layer needs none but is a single keyless engine (Exa MCP) that can rate-limit (429) — switch with `/web_change api` once keys are configured.
 
 ---
 

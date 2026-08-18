@@ -4,7 +4,7 @@
  * Two layers, switched at runtime with `/web_change` (verbatim extension
  * command name):
  *   - "free": keyless Exa MCP (web_search_exa on mcp.exa.ai) — single engine
- *   - "api" : Tavily + Brave + Exa API keys — the multi-engine fused route
+ *   - "api" : Tavily + Brave + Exa + TinyFish API keys — the multi-engine fused route
  *
  * The choice persists to disk so it survives reloads. With no saved preference,
  * defaults to `api` when search API keys are configured, otherwise `free`
@@ -23,7 +23,7 @@ export type WebLayer = "free" | "api";
 
 export const LAYER_LABELS: Record<WebLayer, string> = {
 	free: "free — exa-free keyless (single engine, no fusion cross-check)",
-	api: "api — tavily + brave + exa API (multi-engine fusion)",
+	api: "api — tavily + brave + exa + tinyfish API (multi-engine fusion)",
 };
 
 /** Same resolution as pi's getAgentDir(): env override, else ~/.pi/agent. */

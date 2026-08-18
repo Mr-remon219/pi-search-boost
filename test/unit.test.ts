@@ -12,12 +12,14 @@ import { describe, it } from "node:test";
 import { JsonCache } from "../lib/cache.ts";
 import {
 	applyBraveSiteFilters,
+	buildTinyfishParams,
 	domainBonus,
 	estimateComplexity,
 	expandQueries,
 	parseDate,
 	preprocessQuery,
 	searchCacheKey,
+	tinyfishApiKey,
 } from "../lib/engines.ts";
 import { excerptForTool, pickExcerpts, pickParagraphs } from "../lib/extract.ts";
 import { getLayer, setLayer } from "../lib/layer.ts";
@@ -212,6 +214,67 @@ describe("engine query adapters", () => {
 		assert.equal(
 			applyBraveSiteFilters("rag", { includeDomains: ["arxiv.org", "github.com"], excludeDomains: ["pinterest.com"] }),
 			"rag (site:arxiv.org OR site:github.com) -site:pinterest.com",
+		);
+	});
+});
+
+describe("tinyfish engine", () => {
+	it("builds native params: comma-joined domains + last_n_minutes recency", () => {
+		const p = buildTinyfishParams("tokio runtime", {
+			includeDomains: ["docs.rs", "github.com"],
+			excludeDomains: ["pinterest.com"],
+			recency: "week",
+		});
+		assert.equal(p.get("query"), "tokio runtime");
+		assert.equal(p.get("include_domains"), "docs.rs,github.com");
+		assert.equal(p.get("exclude_domains"), "pinterest.com");
+		assert.equal(p.get("last_n_minutes"), "10080");
+	});
+
+	it("caps domain lists at 5 and omits params that are not set", () => {
+		const capped = buildTinyfishParams("q", {
+			includeDomains: ["a.com", "b.com", "c.com", "d.com", "e.com", "f.com", "g.com"],
+		});
+		assert.equal(capped.get("include_domains")!.split(",").length, 5);
+		const bare = buildTinyfishParams("q");
+		assert.equal(bare.get("include_domains"), null);
+		assert.equal(bare.get("exclude_domains"), null);
+		assert.equal(bare.get("last_n_minutes"), null);
+	});
+
+	it("maps every recency window to its TinyFish minute equivalent", () => {
+		assert.equal(buildTinyfishParams("q", { recency: "day" }).get("last_n_minutes"), "1440");
+		assert.equal(buildTinyfishParams("q", { recency: "month" }).get("last_n_minutes"), "43200");
+		assert.equal(buildTinyfishParams("q", { recency: "year" }).get("last_n_minutes"), "525600");
+	});
+
+	it("resolves PI_SEARCH_TINYFISH_KEY first, falling back to the official TINYFISH_API_KEY", () => {
+		const primary = "PI_SEARCH_TINYFISH_KEY";
+		const official = "TINYFISH_API_KEY";
+		const savedPrimary = process.env[primary];
+		const savedOfficial = process.env[official];
+		try {
+			process.env[primary] = "project-namespace-key";
+			process.env[official] = "official-sdk-key";
+			assert.equal(tinyfishApiKey(), "project-namespace-key");
+			delete process.env[primary];
+			assert.equal(tinyfishApiKey(), "official-sdk-key");
+			delete process.env[official];
+			assert.equal(tinyfishApiKey(), undefined);
+		} finally {
+			if (savedPrimary !== undefined) process.env[primary] = savedPrimary;
+			if (savedOfficial !== undefined) process.env[official] = savedOfficial;
+		}
+	});
+
+	it("gets an option-sensitive cache key (native filters change the answer)", () => {
+		assert.notEqual(
+			searchCacheKey("tinyfish", "q", 8, { includeDomains: ["docs.rs"] }),
+			searchCacheKey("tinyfish", "q", 8, {}),
+		);
+		assert.notEqual(
+			searchCacheKey("tinyfish", "q", 8, { recency: "week" }),
+			searchCacheKey("tinyfish", "q", 8, {}),
 		);
 	});
 });

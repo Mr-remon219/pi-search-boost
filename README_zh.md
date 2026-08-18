@@ -12,7 +12,7 @@
 > | [**dsh-search-boost**](https://github.com/Mr-remon219/dsh-search-boost) | [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) | [GitHub](https://github.com/Mr-remon219/dsh-search-boost) · [npm](https://www.npmjs.com/package/dsh-search-boost) |
 > | [**pi-search-boost**](https://github.com/Mr-remon219/pi-search-boost)（本仓库） | [pi](https://github.com/earendil-works/pi-coding-agent) | 当前仓库 |
 
-**free** 层为 keyless Exa MCP 单引擎；**api** 层在配置 key 后并行融合 Tavily、Brave、Exa（配一个即可；建议配齐三个）。用 `/web_change` 切换。
+**free** 层为 keyless Exa MCP 单引擎；**api** 层在配置 key 后并行融合 Tavily、Brave、Exa、TinyFish（配一个即可；TinyFish 免费——引擎越多跨引擎共识越准）。用 `/web_change` 切换。
 
 English → [README.md](./README.md)
 
@@ -20,9 +20,9 @@ English → [README.md](./README.md)
 
 ## 你能得到什么
 
-- **融合多引擎搜索** — api 层：Tavily + Brave API + Exa 并行；free 层：keyless Exa MCP（单引擎）。用 `/web_change` 切换
+- **融合多引擎搜索** — api 层：Tavily + Brave API + Exa + TinyFish 并行；free 层：keyless Exa MCP（单引擎）。用 `/web_change` 切换
 - **跨引擎排序** — 按 URL 去重、按引擎共识与域名质量交叉排序，带每域名软多样性衰减；被 2+ 个独立引擎命中的结果是高置信，单引擎噪音被降权
-- **复杂度路由** — 搜索预算绑定查询复杂度：`simple` = 1 变体 × 2 引擎（1 credit）、`medium` = 2 × 3、`complex` = 3 × 4 + advanced 抽取（2 credits）
+- **复杂度路由** — 搜索预算绑定查询复杂度：`simple` = 1 变体 × 3 引擎（Tavily + Brave + TinyFish，1 credit）、`medium` = 2 × 4、`complex` = 3 × 4 + advanced 抽取（2 credits；TinyFish 免费不耗 credits）
 - **聚焦过滤抓页** — `fetch_page` 的 `focus` 参数只保留与查询相关的段落（实测省 ~95% token）
 - **深度研究循环** — 检索 → 抓页 → 抽取 → 覆盖度检查 → 生成追问 → 收敛，带逐来源佐证（关键声明需 ≥2 个独立域名）
 - **并行多代理研究** — 把问题拆成 2-4 个子任务，每个作为独立 pi 子进程运行，各自有搜索预算
@@ -105,11 +105,12 @@ Key 是**环境变量**（扩展不读 `.env` 文件）：
 | `PI_SEARCH_TAVILY_KEY` | Tavily | 为 agent 设计的搜索 API，质量最好（推荐）。1000 免费 credits/月 |
 | `PI_SEARCH_EXA_KEY` | Exa | 语义/神经检索，与关键词引擎互补 |
 | `PI_SEARCH_BRAVE_KEY` | Brave | 关键词 + 操作符 |
+| `PI_SEARCH_TINYFISH_KEY` | TinyFish | 免费网页搜索（30 req/min，不耗 credits）——零成本点亮 api 层的首选；与 Exa 互补。未设置时回退读 `TINYFISH_API_KEY`（官方 SDK 变量名） |
 | `PI_SEARCH_CACHE_TTL` | — | 搜索缓存秒数（默认 `21600`，6h） |
 | `PI_SEARCH_PAGE_TTL` | — | 页面缓存秒数（默认 `86400`，24h） |
 | `PI_SEARCH_ALLOW_TUN_FAKEIP` | — | 设为 `0` 关闭 Clash/sing-box TUN fake-ip carve-out（默认开启） |
 
-注册入口：[Tavily](https://tavily.com)（1000 免费 credits/月）· [Exa](https://exa.ai) · [Brave](https://brave.com/search/api/)
+注册入口：[Tavily](https://tavily.com)（1000 免费 credits/月）· [Exa](https://exa.ai) · [Brave](https://brave.com/search/api/) · [TinyFish](https://tinyfish.ai)（搜索免费）
 
 ---
 
@@ -160,7 +161,7 @@ pi remove git:github.com/Mr-remon219/pi-search-boost
 | --- | --- |
 | `query` | 问题或主题 |
 | `queries` | 可选关键词变体（省略时自动派生） |
-| `engines` | 引擎子集覆盖：`tavily`、`exa`、`brave`（api 层）或 `exa-free`（free 层）；默认 = 当前层的引擎 |
+| `engines` | 引擎子集覆盖：`tavily`、`exa`、`brave`、`tinyfish`（api 层）或 `exa-free`（free 层）；默认 = 当前层的引擎 |
 | `max_results` | 最大融合结果数（1-20，默认 10） |
 | `include_domains` / `exclude_domains` | 客户端硬过滤域名（引擎忽略 `site:` 操作符） |
 | `recency` | `day`/`week`/`month`/`year` —— 带日期结果半衰期指数衰减 |
@@ -200,7 +201,7 @@ pi remove git:github.com/Mr-remon219/pi-search-boost
 ```
 index.ts        工具注册（fused_search、fetch_page、deep_research、
                 research_parallel、x_search）、TUI 命令、<search_balance> 规则集注入
-lib/engines.ts  引擎适配（Tavily、Exa、Brave API、exa-free MCP）、查询预处理
+lib/engines.ts  引擎适配（Tavily、Exa、Brave API、TinyFish、exa-free MCP）、查询预处理
                 （site:/OR/引号）、复杂度路由、跨引擎融合打分、recency 衰减
 lib/xsearch.ts  x_search 主路径：pi 直接 POST Responses API（托管 x_search 工具），
                 用 grok 的 OIDC 登录态或 XAI_API_KEY——零子进程；快速凭据预检
@@ -253,7 +254,7 @@ lib/util.ts     带超时/信号的 fetch、HTML 解码、URL 归一化、CJK �
 - **X/Twitter 实时数据**：托管 x_search 路径需要 grok 登录或 `XAI_API_KEY`；无凭据时 `x_search` 走多引擎 + guest GraphQL + oEmbed 降级（索引帖子，非完整实时流）。
 - **模型原生触发**：搜索触发靠策略（系统提示词）驱动，不是 RL 训练进模型。
 - **无自建索引**：检索经 Tavily / Brave / Exa / Exa MCP 代理，没有本地网页索引。
-- **free 层是单引擎**：keyless 的 Exa MCP 可能 429；配置 API 密钥后用 `/web_change api` 开启多引擎融合。
+- **free 层是单引擎**：keyless 的 Exa MCP 可能 429；配置任一搜索密钥（TINYFISH_API_KEY 免费注册即可）后用 `/web_change api` 开启多引擎融合。
 
 ---
 

@@ -9,9 +9,9 @@
  * Install: this directory lives in ~/.pi/agent/extensions/ (auto-discovered).
  * Two search layers, switched with /web_change (see lib/layer.ts):
  *   - free: keyless Exa MCP (exa-free) — no keys required, single engine
- *   - api : Tavily + Brave + Exa API keys
+ *   - api : Tavily + Brave + Exa + TinyFish API keys
  * Env keys (api layer):
- *   PI_SEARCH_TAVILY_KEY, PI_SEARCH_EXA_KEY, PI_SEARCH_BRAVE_KEY
+ *   PI_SEARCH_TAVILY_KEY, PI_SEARCH_EXA_KEY, PI_SEARCH_BRAVE_KEY, PI_SEARCH_TINYFISH_KEY
  *   PI_SEARCH_CACHE_TTL (search cache seconds, default 21600)
  *   PI_SEARCH_PAGE_TTL  (page cache seconds,  default 86400)
  */
@@ -79,7 +79,7 @@ Stop when (anti-over-search):
 
 Search has a cost: a simple query costs ~1 credit, an advanced query ~2 (Tavily); multi-step research multiplies token use 4x+. Choose the cheapest tier that answers the question, and stop when the next search adds less value than the answer you can already write.
 
-The active search layer (set with /web_change) is free = keyless Exa MCP, single engine, ~2-3s per call, occasional 429; api = tavily+brave+exa multi-engine fusion. In free layer prefer fewer variants, lean on cache, and treat 429 as a signal to switch to api rather than retrying the same call.
+The active search layer (set with /web_change) is free = keyless Exa MCP, single engine, ~2-3s per call, occasional 429; api = tavily+brave+exa+tinyfish multi-engine fusion. In free layer prefer fewer variants, lean on cache, and treat 429 as a signal to switch to api rather than retrying the same call.
 
 Autonomy when tools fall short (do not stall, do not give up):
 - If search results are thin or miss the point, refine and retry once with a new angle (different terms, English/Chinese, narrower site target) — a second attempt is normal; a third identical attempt is a loop (stop)
@@ -133,7 +133,7 @@ During coding / development work, search BEFORE you write — never write code a
 		name: "fused_search",
 		label: "Fused Web Search",
 		description:
-			"Web search: runs keyword variants across the active layer's engines in parallel (layer = api: Tavily/Brave/Exa APIs, or free: keyless Exa MCP; switched with /web_change), deduplicates by URL, and cross-ranks results by engine agreement and domain quality. Returns up to max_results ranked hits with the engines that found each one. This is the only search tool — use it for everything from single quick lookups to multi-faceted research (pass complexity simple for the former).",
+			"Web search: runs keyword variants across the active layer's engines in parallel (layer = api: Tavily/Brave/Exa/TinyFish APIs, or free: keyless Exa MCP; switched with /web_change), deduplicates by URL, and cross-ranks results by engine agreement and domain quality. Returns up to max_results ranked hits with the engines that found each one. This is the only search tool — use it for everything from single quick lookups to multi-faceted research (pass complexity simple for the former).",
 		promptSnippet: "Search the web across multiple engines in parallel with keyword variants",
 		promptGuidelines: [
 			"fused_search: it is the single search entry point — for a quick lookup pass complexity=simple (1 variant, cheap); for multi-faceted or research-oriented questions let the tier default to medium/complex and give keyword variants.",
@@ -141,7 +141,7 @@ During coding / development work, search BEFORE you write — never write code a
 			"fused_search angles: when a topic needs depth, call it repeatedly with a different angle each time (component, use-case, comparison, official docs, community discussion) instead of one broad query.",
 			"fused_search: when a term is ambiguous, pass `exclude_domains` to drop known noise (e.g. exclude wikipedia.org / baike.baidu.com when the query has a generic acronym).",
 			"fused_search: for time-sensitive questions pass `recency` (day/week/month/year) — results with a publish date outside the window are demoted, and dated results are shown with their publish date.",
-			"fused_search: the active layer (free = keyless Exa MCP single engine; api = tavily+brave+exa) is selected with /web_change. In free layer expect fewer cross-engine hits and possible 429 — prefer fewer variants and rely on cache; switch to api when stakes are high.",
+			"fused_search: the active layer (free = keyless Exa MCP single engine; api = tavily+brave+exa+tinyfish) is selected with /web_change. In free layer expect fewer cross-engine hits and possible 429 — prefer fewer variants and rely on cache; switch to api when stakes are high.",
 			"fused_search: to restrict to specific sites use `include_domains` (e.g. official docs domains); note engines ignore site: operators, so this is a strict client-side filter.",
 		],
 		parameters: Type.Object({
@@ -175,7 +175,7 @@ During coding / development work, search BEFORE you write — never write code a
 			),
 			complexity: Type.Optional(
 				StringEnum(["auto", "simple", "medium", "complex"], {
-					description: "Search budget tier: auto = heuristic (default). simple = tavily+brave / 1 variant, medium = tavily+brave+exa / 2 variants, complex = same 3 engines / 3 variants + Tavily advanced. Explicit tier overrides the heuristic.",
+					description: "Search budget tier: auto = heuristic (default). simple = tavily+brave+tinyfish / 1 variant, medium = tavily+brave+exa+tinyfish / 2 variants, complex = same 4 engines / 3 variants + Tavily advanced. TinyFish is free, so it joins every tier without credit cost. Explicit tier overrides the heuristic.",
 				}),
 			),
 		}),
@@ -692,7 +692,7 @@ During coding / development work, search BEFORE you write — never write code a
 		name: "x_search",
 		label: "X (Twitter) Search",
 		description:
-			"Search X/Twitter in real time (posts, users, threads). Keyword/semantic run as PARALLEL instant search: the xAI x_search hosted tool (grok login / XAI_API_KEY, results merged, deduped) alongside the fused multi-engine route (Tavily/Brave/Exa or exa-free, site-restricted to x.com). Works even with NO credentials — routes straight to multi-engine + oEmbed full-text enhancement. Four modes: keyword (X advanced syntax: from:user, since:YYYY-MM-DD, min_faves:N), semantic (natural language), user (structured profile + timeline via guest GraphQL), thread (full conversation by post id). Configure credentials with /x-login.",
+			"Search X/Twitter in real time (posts, users, threads). Keyword/semantic run as PARALLEL instant search: the xAI x_search hosted tool (grok login / XAI_API_KEY, results merged, deduped) alongside the fused multi-engine route (Tavily/Brave/Exa/TinyFish or exa-free, site-restricted to x.com). Works even with NO credentials — routes straight to multi-engine + oEmbed full-text enhancement. Four modes: keyword (X advanced syntax: from:user, since:YYYY-MM-DD, min_faves:N), semantic (natural language), user (structured profile + timeline via guest GraphQL), thread (full conversation by post id). Configure credentials with /x-login.",
 		promptSnippet: "Search X/Twitter posts, users, and threads via the xAI x_search API (direct, no subprocess)",
 		promptGuidelines: [
 			"x_search: type=keyword for real-time post search with X advanced syntax (from:user, since:/until:date, min_faves:N, lang:xx); type=semantic for natural-language relevance; type=user to get a structured account profile + recent timeline (followers, bio, posts with engagement); type=thread with a post id (or x.com/.../status/<id> URL) for the full conversation.",
@@ -996,7 +996,7 @@ During coding / development work, search BEFORE you write — never write code a
 					hints.push(
 						"no API keys detected — fused_search will fall back to exa-free per query, or run /web_change free for the keyless layer",
 					);
-					hints.push("set PI_SEARCH_TAVILY_KEY / PI_SEARCH_BRAVE_KEY / PI_SEARCH_EXA_KEY, then /web_change api");
+					hints.push("set PI_SEARCH_TAVILY_KEY / PI_SEARCH_BRAVE_KEY / PI_SEARCH_EXA_KEY / PI_SEARCH_TINYFISH_KEY (tinyfish is free), then /web_change api");
 				}
 				if (current === "free") {
 					hints.push("keyless single-engine mode — run /web_change api after configuring keys for multi-engine fusion");
