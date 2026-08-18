@@ -266,4 +266,8 @@ lib/util.ts     带超时/信号的 fetch、HTML 解码、URL 归一化、CJK �
 
 MIT
 
-**相关链接：** [Issues](https://github.com/Mr-remon219/pi-search-boost/issues) · [search-boost](https://github.com/Mr-remon219/search-boost) · [dsh-search-boost](https://github.com/Mr-remon219/dsh-search-boost) · [Linux.do](https://linux.do/)
+---
+
+**相关链接：** [Issues](https://github.com/Mr-remon219/pi-search-boost/issues) · [search-boost](https://github.com/Mr-remon219/search-boost) · [dsh-search-boost](https://github.com/Mr-remon219/dsh-search-boost)
+
+**友情链接：** [LINUX DO 社区](https://linux.do/)

@@ -291,4 +291,8 @@ lib/util.ts     fetch with timeout/signal, HTML decoding, URL normalization, CJK
 
 MIT
 
-**Links:** [Issues](https://github.com/Mr-remon219/pi-search-boost/issues) · [search-boost](https://github.com/Mr-remon219/search-boost) · [dsh-search-boost](https://github.com/Mr-remon219/dsh-search-boost) · [Linux.do](https://linux.do/)
+---
+
+**Links:** [Issues](https://github.com/Mr-remon219/pi-search-boost/issues) · [search-boost](https://github.com/Mr-remon219/search-boost) · [dsh-search-boost](https://github.com/Mr-remon219/dsh-search-boost)
+
+**Friendly link:** [LINUX DO 社区](https://linux.do/)
