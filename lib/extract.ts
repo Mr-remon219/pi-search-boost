@@ -9,7 +9,8 @@
  */
 import { JsonCache } from "./cache.ts";
 import {
-	assertPublicHttpUrl, collapseSpace, countWords, decodeHtml, fetchText, hostOf, nowIso, queryTerms, stripTags,
+	assertPublicHttpUrl, collapseSpace, countWords, decodeHtml, fetchText, hostOf, nowIso, queryTerms,
+	searchTermRegExp, stripTags,
 } from "./util.ts";
 
 export interface PageResult {
@@ -125,7 +126,9 @@ export interface FetchPageOptions {
 }
 
 export async function fetchPage(url: string, opts: FetchPageOptions = {}): Promise<PageResult> {
-	await assertPublicHttpUrl(url);
+	opts.signal?.throwIfAborted();
+	await assertPublicHttpUrl(url, opts.signal);
+	opts.signal?.throwIfAborted();
 	const cache = opts.cache;
 	const maxChars = opts.maxChars ?? DEFAULT_MAX_CHARS;
 	const cacheTtl = Number(process.env.PI_SEARCH_PAGE_TTL ?? 86400); // 24h
@@ -180,21 +183,31 @@ export async function fetchPage(url: string, opts: FetchPageOptions = {}): Promi
 
 	const jinaP: Promise<RaceResult> = fetchViaJina(url, opts.signal).then(
 		(j) => ({ ok: true, via: "jina", title: j.title, content: j.content }),
-		(err) => ({
-			ok: false, via: "jina", title: "", content: "",
-			error: err instanceof Error ? err.message : String(err),
-		}),
+		(err) => {
+			opts.signal?.throwIfAborted();
+			return {
+				ok: false, via: "jina", title: "", content: "",
+				error: err instanceof Error ? err.message : String(err),
+			};
+		},
 	);
-	const localP: Promise<RaceResult> = fetchText(url, { timeoutMs: 10000, signal: localSignal }).then(
+	const localP: Promise<RaceResult> = fetchText(url, {
+		timeoutMs: 10000,
+		signal: localSignal,
+		publicRedirects: true,
+	}).then(
 		(res) => {
 			if (!res.ok) return { ok: false, via: "local", title: "", content: "", error: `http ${res.status}` };
 			const ext = localExtract(res.text);
 			return { ok: true, via: "local", title: ext.title, content: ext.content, links: ext.links };
 		},
-		(err) => ({
-			ok: false, via: "local", title: "", content: "",
-			error: err instanceof Error ? err.message : String(err),
-		}),
+		(err) => {
+			opts.signal?.throwIfAborted();
+			return {
+				ok: false, via: "local", title: "", content: "",
+				error: err instanceof Error ? err.message : String(err),
+			};
+		},
 	);
 
 	const waitFor = <T>(p: Promise<T>, ms: number): Promise<T | null> => {
@@ -270,6 +283,7 @@ export async function fetchPage(url: string, opts: FetchPageOptions = {}): Promi
 				via = "jina-browser";
 			}
 		} catch (err) {
+			opts.signal?.throwIfAborted();
 			jinaError = `${jinaError ?? ""}; browser: ${err instanceof Error ? err.message : String(err)}`.trim();
 		}
 	}
@@ -281,9 +295,11 @@ export async function fetchPage(url: string, opts: FetchPageOptions = {}): Promi
 			adopt({ ok: true, via: "jina", title: j.title, content: j.content });
 			via = "jina-browser";
 		} catch (err) {
+			opts.signal?.throwIfAborted();
 			jinaError = `${jinaError ?? ""}; browser: ${err instanceof Error ? err.message : String(err)}`.trim();
 		}
 	}
+	opts.signal?.throwIfAborted();
 	if (!content) {
 		throw new Error(
 			`failed to extract content from ${url} (jina: ${jinaError ?? "n/a"}${localError ? `, local: ${localError}` : ""})`,
@@ -346,67 +362,177 @@ export async function fetchPage(url: string, opts: FetchPageOptions = {}): Promi
 	return result;
 }
 
+/** Markdown data tables often contain many links but are evidence, not nav. */
+function isTableSeparator(line: string): boolean {
+	const cells = line.trim().replace(/^\||\|$/g, "").split("|").map((cell) => cell.trim());
+	return cells.length >= 2 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function isMarkdownTable(text: string): boolean {
+	const lines = text.split("\n");
+	return lines.some((line) => line.includes("|") && !isTableSeparator(line)) &&
+		lines.some(isTableSeparator);
+}
+
 /** Reader-mode markdown keeps navigation as dense link lists; those lines
  * match query terms as readily as prose and are worthless as evidence. */
 function isBoilerplate(text: string): boolean {
-	const linkChars = (text.match(/\]\(|https?:\/\/|!\[/g) ?? []).length;
-	if (linkChars >= 3) return true;
+	if (isMarkdownTable(text)) return false;
+	const linkCount = (text.match(/\]\(|https?:\/\/|!\[/g) ?? []).length;
+	const proseWords = countWords(text.replace(/\[[^\]]*\]\([^)]*\)/g, " "));
+	if (linkCount >= 3 && proseWords < 20) return true;
 	const urlChars = (text.match(/https?:\/\/\S+/g) ?? []).join("").length;
 	return urlChars > text.length * 0.35;
 }
 
-function termMatchers(text: string): Array<{ re: RegExp; weight: number }> {
-	return queryTerms(text)
+const GENERIC_FOCUS_TERMS = new Set([
+	"current", "latest", "newest", "recent", "status", "release", "releases",
+	"version", "versions", "official", "overview", "guide", "documentation",
+	"identify", "determine", "find", "report", "explain", "information",
+	"当前", "最新", "状态", "版本", "发布", "官方", "说明", "信息",
+]);
+
+interface TermMatcher {
+	term: string;
+	re: RegExp;
+	weight: number;
+	generic: boolean;
+}
+
+function termMatchers(text: string): TermMatcher[] {
+	return [...new Set(queryTerms(text))]
 		.filter((t) => t.length >= 2)
 		.map((t) => ({
-			re: new RegExp(t.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"),
+			term: t,
+			re: searchTermRegExp(t),
 			weight: Math.min(t.length, 12),
+			generic: GENERIC_FOCUS_TERMS.has(t.toLowerCase()),
 		}));
 }
 
-function scoreAgainstTerms(text: string, matchers: ReturnType<typeof termMatchers>): number {
+function scoreAgainstTerms(
+	text: string,
+	matchers: ReturnType<typeof termMatchers>,
+): { score: number; uniqueHits: number; subjectHits: number } {
 	const lower = text.toLowerCase();
 	let score = 0;
-	for (const { re, weight } of matchers) {
+	let uniqueHits = 0;
+	let subjectHits = 0;
+	for (const { re, weight, generic } of matchers) {
 		re.lastIndex = 0;
-		score += (lower.match(re)?.length ?? 0) * weight;
+		const count = lower.match(re)?.length ?? 0;
+		if (count === 0) continue;
+		uniqueHits++;
+		if (!generic) subjectHits++;
+		// Cap repetition so one generic word cannot dominate the ranking.
+		score += Math.min(count, 2) * (generic ? Math.max(2, weight * 0.35) : weight);
 	}
-	return score;
+	// Reward breadth: a status table matching four concepts should outrank an
+	// installation paragraph that repeats only "Node.js" many times.
+	score += uniqueHits * uniqueHits * 2 + subjectHits * 5;
+	return { score, uniqueHits, subjectHits };
+}
+
+function normalizeBlock(text: string): string {
+	if (!isMarkdownTable(text)) return collapseSpace(text);
+	return text
+		.split("\n")
+		.map((line) => line.trim().replace(/[ \t]+/g, " "))
+		.filter(Boolean)
+		.join("\n");
+}
+
+/** Preserve table headers plus the highest-relevance complete rows. */
+function trimRelevantTable(text: string, matchers: TermMatcher[], maxLen: number): string {
+	if (text.length <= maxLen) return text;
+	const lines = text.split("\n").filter(Boolean);
+	const separator = lines.findIndex(isTableSeparator);
+	const headerEnd = separator >= 0 ? separator : Math.min(1, lines.length - 1);
+	const selected = new Set<number>();
+	for (let i = 0; i <= headerEnd; i++) selected.add(i);
+	const rankedRows = lines
+		.map((line, index) => ({ line, index, score: scoreAgainstTerms(line, matchers).score }))
+		.filter((row) => row.index > headerEnd)
+		.sort((a, b) => b.score - a.score || a.index - b.index);
+	let used = [...selected].reduce((sum, index) => sum + lines[index]!.length + 1, 0);
+	for (const row of rankedRows) {
+		if (used + row.line.length + 1 > maxLen - 20) continue;
+		selected.add(row.index);
+		used += row.line.length + 1;
+	}
+	return [...selected].sort((a, b) => a - b).map((index) => lines[index]).join("\n") + "\n[table truncated]";
 }
 
 /**
  * Paragraphs most relevant to the focus terms (dynamic filtering, find_in_page).
- * Length floors are counted in words, not characters: a 40-character Chinese
- * paragraph was previously discarded before it could be scored.
+ * Scores unique concept coverage rather than any single term, preserves data
+ * tables, and includes bounded neighboring context around headings/tables.
  */
 export function pickParagraphs(content: string, focus: string, max = 8, maxLen = 400): string[] {
 	const matchers = termMatchers(focus);
-	return content
+	const blocks = content
 		.split(/\n{2,}/)
-		.map((p) => collapseSpace(p))
-		.filter((p) => countWords(p) >= 8 && !isBoilerplate(p))
-		.map((p) => ({ p, score: scoreAgainstTerms(p, matchers) }))
-		.filter((x) => x.score > 0)
-		.sort((a, b) => b.score - a.score)
-		.slice(0, max)
-		.map((x) => x.p.slice(0, maxLen));
+		.map((raw, index) => ({ raw: raw.trim(), index }))
+		.filter((x) => {
+			const structural = /^#{1,6}\s+/m.test(x.raw) || isMarkdownTable(x.raw);
+			return (structural || countWords(x.raw) >= 6) && !isBoilerplate(x.raw);
+		})
+		.map((x) => {
+			const p = normalizeBlock(x.raw);
+			const relevance = scoreAgainstTerms(p, matchers);
+			const table = isMarkdownTable(x.raw);
+			const heading = /^#{1,6}\s+/m.test(x.raw);
+			let score = relevance.score;
+			if (table && relevance.uniqueHits > 0) score += 12 + relevance.uniqueHits * 4;
+			if (heading && relevance.uniqueHits > 0) score += 8;
+			return { ...x, p, table, heading, ...relevance, score };
+		});
+	const candidates = blocks
+		.filter((x) => x.score > 0 && (x.subjectHits > 0 || x.uniqueHits >= 2))
+		.sort((a, b) => b.score - a.score || a.index - b.index);
+	const byIndex = new Map(blocks.map((x) => [x.index, x]));
+	const chosen: typeof blocks = [];
+	const seen = new Set<number>();
+	const add = (x: (typeof blocks)[number] | undefined) => {
+		if (!x || seen.has(x.index) || chosen.length >= max) return;
+		seen.add(x.index);
+		chosen.push(x);
+	};
+	for (const seed of candidates) {
+		if (chosen.length >= max) break;
+		// A nearby heading/table supplies the schema or subject that a row alone
+		// lacks. Only table/heading seeds expand context, preventing broad drift.
+		if (seed.table || seed.heading) add(byIndex.get(seed.index - 1));
+		add(seed);
+		if (seed.table || seed.heading) add(byIndex.get(seed.index + 1));
+	}
+	return chosen.map((x) => x.table
+		? trimRelevantTable(x.p, matchers, Math.max(maxLen, 800))
+		: x.p.slice(0, maxLen));
 }
 
-/** Pick the sentences of a page most relevant to the query (for excerpts/corroboration). */
+/** Pick the sentences/blocks most relevant to the query for evidence excerpts. */
 export function pickExcerpts(content: string, query: string, max = 3, maxLen = 500): string[] {
 	const matchers = termMatchers(query);
 	const scored = content
 		.split(/(?<=[.!?。！？])\s+|\n{2,}/)
-		.map((s) => collapseSpace(s))
-		.filter((s) => countWords(s) >= 12 && !isBoilerplate(s))
-		.map((s) => ({ s, score: scoreAgainstTerms(s, matchers) }))
-		.filter((x) => x.score > 0)
+		.map((s) => s.trim())
+		.filter((s) => countWords(s) >= 10 && !isBoilerplate(s))
+		.map((raw) => {
+			const s = normalizeBlock(raw);
+			const relevance = scoreAgainstTerms(s, matchers);
+			const table = isMarkdownTable(raw);
+			return { s, ...relevance, score: relevance.score + (table ? 10 : 0) };
+		})
+		.filter((x) => x.score > 0 && (x.subjectHits > 0 || x.uniqueHits >= 2))
 		.sort((a, b) => b.score - a.score)
 		.slice(0, max);
 	if (scored.length === 0) {
 		return [collapseSpace(content).slice(0, maxLen)];
 	}
-	return scored.map((x) => x.s.slice(0, maxLen));
+	return scored.map((x) => isMarkdownTable(x.s)
+		? trimRelevantTable(x.s, matchers, maxLen)
+		: x.s.slice(0, maxLen));
 }
 
 /** Truncate engine-provided page text for the fused_search tool payload. */

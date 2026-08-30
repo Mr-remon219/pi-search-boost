@@ -23,29 +23,34 @@ import { fallbackXSearch } from "../lib/xfallback.ts";
 
 const SKIP = process.env.PI_SKIP_BLACKBOX === "1";
 const WORKSPACE = path.resolve(import.meta.dirname, "..");
+const LOAD_ROOT = process.env.PI_SEARCH_TEST_PACKAGE_ROOT ?? WORKSPACE;
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent");
 
 
 describe("blackbox: pi ecosystem", { skip: SKIP }, () => {
 	it("extension entry resolves to a loadable index.ts", () => {
 		assert.ok(fs.existsSync(SEARCH_BOOST_EXT), SEARCH_BOOST_EXT);
-		assert.ok(fs.existsSync(path.join(WORKSPACE, "index.ts")));
+		assert.ok(fs.existsSync(path.join(LOAD_ROOT, "index.ts")));
 	});
 
-	it("pi loads the extension before the LLM (API-key error = success)", () => {
+	it("pi loads the extension with or without an available LLM credential", () => {
 		let out = "";
+		let succeeded = true;
 		try {
-			execSync(`pi -ne --no-extensions -e "${WORKSPACE}/index.ts" -p "ping"`, {
+			out = execSync(`pi -ne --no-extensions -e "${LOAD_ROOT}/index.ts" -p "ping"`, {
 				encoding: "utf8",
 				stdio: ["ignore", "pipe", "pipe"],
 				timeout: 15_000,
 			});
 		} catch (err) {
+			succeeded = false;
 			const e = err as { stdout?: string; stderr?: string; message?: string };
 			out = `${e.stdout ?? ""}${e.stderr ?? ""}${e.message ?? ""}`;
 		}
-		assert.match(out, /API key|No API key/i, `expected API-key gate, got: ${out.slice(0, 300)}`);
-		assert.doesNotMatch(out, /Cannot find module|SyntaxError|registerTool/i);
+		if (!succeeded) {
+			assert.match(out, /API key|No API key/i, `unexpected Pi startup failure: ${out.slice(0, 300)}`);
+		}
+		assert.doesNotMatch(out, /Cannot find module|SyntaxError|registerTool|conflicts with/i);
 	});
 
 	it("package.json declares pi.extensions entry", () => {

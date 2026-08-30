@@ -19,7 +19,7 @@ import { JsonCache } from "./cache.ts";
 import { getLayer, type WebLayer } from "./layer.ts";
 import {
 	collapseSpace, distinctiveTerms, domainMatches,
-	hostOf, normalizeUrl, pool, queryTerms, segmentCjk, STOPWORDS,
+	hostOf, normalizeUrl, pool, queryTerms, segmentCjk, signalWithTimeout, STOPWORDS, throwIfAborted,
 } from "./util.ts";
 
 export interface SearchHit {
@@ -251,6 +251,8 @@ export interface EngineQueryOptions {
 	recency?: "day" | "week" | "month" | "year";
 	/** tavily search_depth: basic = fast NLP summary, advanced = query-aligned extraction */
 	depth?: "basic" | "advanced";
+	/** caller cancellation; combined with each engine's own timeout */
+	signal?: AbortSignal;
 }
 
 async function searchTavily(query: string, count: number, o: EngineQueryOptions = {}): Promise<RawHit[]> {
@@ -274,7 +276,7 @@ async function searchTavily(query: string, count: number, o: EngineQueryOptions 
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify(body),
-		signal: AbortSignal.timeout(20000),
+		signal: signalWithTimeout(o.signal, 20000),
 	});
 	if (!resp.ok) throw new Error(`tavily http ${resp.status}`);
 	const json = (await resp.json()) as {
@@ -315,7 +317,7 @@ async function searchExa(query: string, count: number, o: EngineQueryOptions = {
 		method: "POST",
 		headers: { "Content-Type": "application/json", "x-api-key": key },
 		body: JSON.stringify(body),
-		signal: AbortSignal.timeout(20000),
+		signal: signalWithTimeout(o.signal, 20000),
 	});
 	if (!resp.ok) throw new Error(`exa http ${resp.status}`);
 	const json = (await resp.json()) as {
@@ -355,7 +357,7 @@ async function searchBrave(query: string, count: number, o: EngineQueryOptions =
 	if (o.recency && RECENCY_TO_PARAM[o.recency]) url += `&freshness=${RECENCY_TO_PARAM[o.recency].brave}`;
 	const resp = await fetch(url, {
 		headers: { "X-Subscription-Token": key, Accept: "application/json" },
-		signal: AbortSignal.timeout(15000),
+		signal: signalWithTimeout(o.signal, 15000),
 	});
 	if (!resp.ok) throw new Error(`brave http ${resp.status}`);
 	const json = (await resp.json()) as {
@@ -406,12 +408,11 @@ async function exaMcpPost(
 		Accept: "application/json, text/event-stream",
 	};
 	if (sessionId) headers["Mcp-Session-Id"] = sessionId;
-	const timeout = AbortSignal.timeout(EXA_MCP_TIMEOUT_MS);
 	const resp = await fetch(EXA_MCP_URL, {
 		method: "POST",
 		headers,
 		body: JSON.stringify(body),
-		signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+		signal: signalWithTimeout(signal, EXA_MCP_TIMEOUT_MS),
 	});
 	if (!resp.ok) {
 		if (resp.status === 429) {
@@ -471,7 +472,15 @@ function parseExaFreeText(text: string): RawHit[] {
 	return hits;
 }
 
-async function searchExaFree(query: string, count: number): Promise<RawHit[]> {
+async function searchExaFree(
+	query: string,
+	count: number,
+	o: EngineQueryOptions = {},
+	emptyRetry = 0,
+	operationSignal?: AbortSignal,
+): Promise<RawHit[]> {
+	// One deadline covers initialize + notification + tool call + empty retry.
+	const deadline = operationSignal ?? signalWithTimeout(o.signal, EXA_MCP_TIMEOUT_MS);
 	// 1) initialize (gets the MCP session id)
 	const init = await exaMcpPost(
 		{
@@ -481,15 +490,20 @@ async function searchExaFree(query: string, count: number): Promise<RawHit[]> {
 			params: {
 				protocolVersion: EXA_MCP_PROTOCOL,
 				capabilities: {},
-				clientInfo: { name: "pi-search-boost", version: "1.0.0" },
+				clientInfo: { name: "pi-search-boost", version: "0.1.3" },
 			},
 		},
 		undefined,
+		deadline,
 	);
 	if (!init.sessionId) throw new Error("exa-free: no MCP session id (initialize failed)");
 	// 2) initialized notification (fire-and-forget; non-fatal)
 	try {
-		await exaMcpPost({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }, init.sessionId);
+		await exaMcpPost(
+			{ jsonrpc: "2.0", method: "notifications/initialized", params: {} },
+			init.sessionId,
+			deadline,
+		);
 	} catch {
 		/* notification failure is not fatal */
 	}
@@ -502,13 +516,22 @@ async function searchExaFree(query: string, count: number): Promise<RawHit[]> {
 			params: { name: "web_search_exa", arguments: { query, numResults: Math.min(count, 10) } },
 		},
 		init.sessionId,
+		deadline,
 	);
 	const text = (call.json.result?.content ?? [])
 		.filter((c) => c?.type === "text")
 		.map((c) => c.text ?? "")
 		.join("\n");
-	if (!text.trim()) return [];
-	return parseExaFreeText(text).slice(0, count);
+	const hits = text.trim() ? parseExaFreeText(text).slice(0, count) : [];
+	// The hosted free endpoint occasionally returns a successful but empty tool
+	// payload. One bounded retry avoids reporting a false-success empty search.
+	if (hits.length === 0 && emptyRetry === 0) {
+		throwIfAborted(deadline);
+		await new Promise((resolve) => setTimeout(resolve, 250));
+		throwIfAborted(deadline);
+		return searchExaFree(query, count, o, 1, deadline);
+	}
+	return hits;
 }
 
 /* --------------------------------- Engine map --------------------------------- */
@@ -749,10 +772,13 @@ export async function fusedSearch(opts: FusedOptions): Promise<FusedResult> {
 		excludeDomains: excludeDomains.length > 0 ? excludeDomains : undefined,
 		recency: opts.recency !== "any" ? opts.recency : undefined,
 		depth,
+		signal: opts.signal,
 	};
 
 	async function runBatch(batch: Array<{ engine: string; query: string }>) {
+		throwIfAborted(opts.signal);
 		await pool(batch, 5, async ({ engine, query }) => {
+			throwIfAborted(opts.signal);
 			const key = searchCacheKey(engine, query, maxPerEngine, engineOpts);
 			const cached = cache?.get<RawHit[]>(key);
 			if (cached) {
@@ -766,6 +792,9 @@ export async function fusedSearch(opts: FusedOptions): Promise<FusedResult> {
 				cache?.set(key, hits, cacheTtl);
 				perEngineHits.set(`${engine}\u0000${query}`, hits);
 			} catch (err) {
+				// Cancellation is control flow, not an engine failure. Let the tool
+				// stop immediately rather than spend API credits until timeout.
+				throwIfAborted(opts.signal);
 				engineStats[engine].errors++;
 				engineStats[engine].note = err instanceof Error ? err.message.slice(0, 80) : String(err);
 				perEngineHits.set(`${engine}\u0000${query}`, []);

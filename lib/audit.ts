@@ -49,10 +49,15 @@ export interface AuditResearchEvent {
 	mode: string;
 	rounds: number;
 	stopReason: string;
+	/** Actual cited/fetched source URLs, never model turn count. */
 	sources: number;
 	domains: number;
 	uncovered: string[];
 	tookMs: number;
+	/** Parallel-mode diagnostics. */
+	subtasks?: number;
+	successfulSubtasks?: number;
+	turns?: number;
 }
 
 export interface AuditXSearchEvent {

@@ -3,6 +3,7 @@
  *   node --experimental-strip-types --test test/unit.test.ts
  */
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -14,20 +15,29 @@ import {
 	applyBraveSiteFilters,
 	domainBonus,
 	estimateComplexity,
+	fusedSearch,
 	expandQueries,
 	parseDate,
 	preprocessQuery,
 	searchCacheKey,
 } from "../lib/engines.ts";
-import { excerptForTool, pickExcerpts, pickParagraphs } from "../lib/extract.ts";
+import { excerptForTool, fetchPage, pickExcerpts, pickParagraphs, type PageResult } from "../lib/extract.ts";
 import { getLayer, setLayer } from "../lib/layer.ts";
 import { hasApiSearchKeys } from "../lib/engines.ts";
-import { plannedResearchRounds } from "../lib/research.ts";
-import { SEARCH_BOOST_EXT } from "../lib/parallel.ts";
+import {
+	applyCorroboration, evaluateCoverage, goalCoverageTerms, mergeInitialQueries, plannedResearchRounds,
+	type ResearchSource,
+} from "../lib/research.ts";
+import {
+	childAttemptSucceeded, extractSourceUrls, isTransientProviderTransportError, retryTransientSubtasks,
+	runParallelResearch, SEARCH_BOOST_EXT, type SubtaskResult,
+} from "../lib/parallel.ts";
 import { extractJsonPayload } from "../lib/xsearch.ts";
 import {
 	assertPublicHttpUrl,
+	containsSearchTerm,
 	countWords,
+	validatePublicRedirect,
 	domainMatches,
 	isPrivateOrLocalIp,
 	isTunFakeIp,
@@ -98,6 +108,27 @@ describe("focus filtering", () => {
 		const picked = pickExcerpts(`${soup}\n\n${prose}`, "reciprocal rank fusion ranking", 2);
 		assert.ok(picked.every((p) => !p.includes("](https://")), picked.join(" | "));
 		assert.ok(picked[0].includes("Reciprocal Rank Fusion"));
+	});
+
+	it("preserves a release-status table instead of treating its links as navigation", () => {
+		const content = [
+			"Node.js installation supports many operating system versions. Installers and package managers are documented here for Node.js users.",
+			"## Node.js release schedule",
+			"Version | Codename | First released | Status\n--- | --- | --- | ---\n[v24](https://nodejs.org/v24) | Krypton | 2025 | Active LTS\n[v22](https://nodejs.org/v22) | Jod | 2024 | Maintenance LTS",
+		].join("\n\n");
+		const kept = pickParagraphs(content, "current Node.js LTS version release status", 4, 400);
+		assert.match(kept.join("\n"), /Node\.js release schedule[\s\S]*v24[\s\S]*Active LTS/);
+		assert.ok(kept.findIndex((p) => p.includes("Active LTS")) <= 1, kept.join(" | "));
+	});
+
+	it("uses Latin token boundaries so Go does not match Google", () => {
+		const content = [
+			"Google publishes ongoing cloud platform documentation and search product announcements for enterprise customers.",
+			"Go concurrency uses goroutines and channels to coordinate independent tasks in production services.",
+		].join("\n\n");
+		const kept = pickParagraphs(content, "Go concurrency channels", 4, 400);
+		assert.ok(kept.some((p) => p.startsWith("Go concurrency")), kept.join(" | "));
+		assert.ok(kept.every((p) => !p.startsWith("Google")), kept.join(" | "));
 	});
 });
 
@@ -216,6 +247,44 @@ describe("engine query adapters", () => {
 	});
 });
 
+describe("engine cancellation", () => {
+	it("propagates caller cancellation into API fetches instead of swallowing it", async () => {
+		const originalFetch = globalThis.fetch;
+		const previousKey = process.env.PI_SEARCH_TAVILY_KEY;
+		const previousLayer = getLayer();
+		process.env.PI_SEARCH_TAVILY_KEY = "test-key";
+		setLayer("api");
+		let observedSignal: AbortSignal | undefined;
+		globalThis.fetch = ((_url: string | URL | Request, init?: RequestInit) => {
+			observedSignal = init?.signal as AbortSignal | undefined;
+			return new Promise<Response>((_resolve, reject) => {
+				const rejectAbort = () => reject(observedSignal?.reason ?? new Error("aborted"));
+				if (observedSignal?.aborted) rejectAbort();
+				else observedSignal?.addEventListener("abort", rejectAbort, { once: true });
+			});
+		}) as typeof fetch;
+		const controller = new AbortController();
+		try {
+			const pending = fusedSearch({
+				query: "unique cancellation fixture",
+				queries: ["unique cancellation fixture"],
+				engines: ["tavily"],
+				complexity: "simple",
+				maxResults: 3,
+				signal: controller.signal,
+			});
+			controller.abort(new Error("caller cancelled"));
+			await assert.rejects(pending, /caller cancelled/);
+			assert.ok(observedSignal?.aborted, "engine fetch must observe the caller abort");
+		} finally {
+			globalThis.fetch = originalFetch;
+			if (previousKey === undefined) delete process.env.PI_SEARCH_TAVILY_KEY;
+			else process.env.PI_SEARCH_TAVILY_KEY = previousKey;
+			setLayer(previousLayer);
+		}
+	});
+});
+
 describe("web layer state", () => {
 	it("defaults to api and round-trips a switch", () => {
 		// layer state is a module-level singleton backed by a file; this test
@@ -268,6 +337,35 @@ describe("SSRF guard", () => {
 		// resolution into that range is the TUN fake-ip carve-out
 		await assert.rejects(() => assertPublicHttpUrl("http://198.18.0.1/"), /blocked url/);
 	});
+
+	it("revalidates every redirect target before following it", async () => {
+		await assert.rejects(
+			() => validatePublicRedirect(
+				"https://public.example/start",
+				"http://169.254.169.254/latest/meta-data",
+			),
+			/blocked url: private IP/,
+		);
+	});
+
+	it("propagates a pre-aborted caller signal even when the page is cached", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fetch-abort-"));
+		const cache = new JsonCache(path.join(dir, "pages.json"));
+		const url = "https://example.com/cached";
+		cache.set(`page:${url}`, {
+			title: "cached", url, domain: "example.com", fetchedAt: new Date().toISOString(),
+			via: "local", content: "cached content", wordCount: 2, links: [],
+		} satisfies PageResult, 60);
+		cache.flush();
+		const controller = new AbortController();
+		const reason = new Error("stop cached fetch");
+		controller.abort(reason);
+		try {
+			await assert.rejects(fetchPage(url, { cache, signal: controller.signal }), (error) => error === reason);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("deep_research step mode", () => {
@@ -276,6 +374,130 @@ describe("deep_research step mode", () => {
 		assert.equal(plannedResearchRounds("step"), 1);
 		assert.equal(plannedResearchRounds("auto", 5), 5);
 		assert.equal(plannedResearchRounds("auto"), 3);
+	});
+});
+
+describe("term boundary matching", () => {
+	it("does not match short Latin terms inside unrelated words", () => {
+		assert.equal(containsSearchTerm("search results from two engines", "lts"), false);
+		assert.equal(containsSearchTerm("Google cloud platform", "go"), false);
+		assert.equal(containsSearchTerm("Node.js Active LTS", "lts"), true);
+		assert.equal(containsSearchTerm("Go uses channels", "go"), true);
+	});
+});
+
+describe("deep_research evidence coverage", () => {
+	const currentYear = new Date().getUTCFullYear();
+	const recentYear = currentYear - 1;
+	const staleYear = currentYear - 2;
+	const source = (domain: string, excerpt: string): ResearchSource => ({
+		title: domain,
+		url: `https://${domain}/release`,
+		domain,
+		fetchedAt: new Date().toISOString(),
+		via: "search",
+		wordCount: countWords(excerpt),
+		excerpt,
+		corroboratedBy: [],
+	});
+
+	it("uses goal subject terms but excludes instruction/temporal prompt words", () => {
+		assert.deepEqual(goalCoverageTerms("identify the current Node.js LTS"), ["node.js", "lts"]);
+	});
+
+	it("keeps a goal-bearing search variant when continuation queries are supplied", () => {
+		assert.deepEqual(
+			mergeInitialQueries("Node.js releases", "identify current LTS", ["maintenance schedule"]),
+			["Node.js releases identify current LTS", "maintenance schedule"],
+		);
+	});
+
+	it("does not mark mutually agreeing but stale temporal evidence as goal-covered", () => {
+		const sources = [
+			source("old-a.example", `Node.js 22.11.0 was the Active LTS release in ${staleYear} for production applications.`),
+			source("old-b.example", `Node.js 22 was the Active LTS line in ${staleYear} and received long-term support.`),
+		];
+		applyCorroboration(sources, "Node.js LTS release identify current Node.js LTS", true);
+		assert.ok(sources.some((s) => s.corroboratedBy.length > 0), "fixture should align on the old claim");
+		const coverage = evaluateCoverage("Node.js LTS release", "identify current Node.js LTS", sources);
+		assert.equal(coverage.uncoveredGoalTerms.length, 0, "subject words have two-domain evidence");
+		assert.equal(coverage.goalEvidenceCovered, false, "stale dates must not satisfy a current goal");
+		assert.equal(coverage.semanticGoalCheck, "not_performed");
+	});
+
+	it("also requires fresh aligned evidence for a temporal query when goal is omitted", () => {
+		const sources = [
+			source("old-a.example", `Node.js 22.11.0 was the Active LTS release in ${staleYear} for production applications.`),
+			source("old-b.example", `Node.js 22 was the Active LTS line in ${staleYear} and received long-term support.`),
+		];
+		applyCorroboration(sources, "current Node.js LTS release", true);
+		const coverage = evaluateCoverage("current Node.js LTS release", undefined, sources);
+		assert.equal(coverage.timeSensitiveGoal, true);
+		assert.equal(coverage.goalEvidenceCovered, false);
+	});
+
+	it("accepts recent two-domain, claim-aligned goal evidence without claiming semantic proof", () => {
+		const sources = [
+			source("new-a.example", `Node.js 24.11.0 is the Active LTS release in ${recentYear} for production applications.`),
+			source("new-b.example", `Node.js 24 is the current Active LTS line released in ${recentYear} with long-term support.`),
+		];
+		applyCorroboration(sources, "Node.js LTS release identify current Node.js LTS", true);
+		const coverage = evaluateCoverage("Node.js LTS release", "identify current Node.js LTS", sources);
+		assert.equal(coverage.goalEvidenceCovered, true);
+		assert.equal(coverage.semanticGoalCheck, "not_performed");
+	});
+
+	it("does not let unrelated fresh claims freshen a stale goal claim", () => {
+		const sources = [
+			source("old-a.example", `Node.js 22 was the Active LTS release in ${staleYear}. Node.js documentation was updated in ${currentYear} for readers.`),
+			source("old-b.example", `Node.js 22 was the Active LTS release in ${staleYear}. Node.js documentation was updated in ${currentYear} for readers.`),
+		];
+		applyCorroboration(sources, "identify current Node.js LTS", true);
+		assert.ok(sources.every((s) => (s.freshCorroboratedBy?.length ?? 0) === 1), "fresh documentation segments align");
+		assert.equal(
+			evaluateCoverage("Node.js LTS", "identify current Node.js LTS", sources).goalEvidenceCovered,
+			false,
+			"freshness must attach to the LTS claim itself",
+		);
+	});
+
+	it("does not let a current copyright date freshen an aligned stale claim", () => {
+		const sources = [
+			source("old-a.example", `Node.js 22 was the Active LTS release in ${staleYear}. Copyright ${currentYear}.`),
+			source("old-b.example", `Node.js 22 was the Active LTS release in ${staleYear}. Copyright ${currentYear}.`),
+		];
+		applyCorroboration(sources, "current Node.js LTS release", true);
+		assert.ok(sources.every((s) => s.corroboratedBy.length === 1));
+		assert.ok(sources.every((s) => (s.freshCorroboratedBy?.length ?? 0) === 0));
+		assert.equal(evaluateCoverage("current Node.js LTS release", undefined, sources).goalEvidenceCovered, false);
+	});
+
+	it("does not corroborate conflicting lifecycle statuses that merely share current", () => {
+		const sources = [
+			source("active.example", `Node.js 24 is the current Active LTS release in ${recentYear}.`),
+			source("maintenance.example", `Node.js 24 is the current Maintenance LTS release in ${recentYear}.`),
+		];
+		applyCorroboration(sources, "current Node.js LTS release", true);
+		assert.deepEqual(sources.map((s) => s.corroboratedBy), [[], []]);
+	});
+
+	it("does not count lts as covered inside the unrelated word results", () => {
+		const sources = [
+			source("a.example", "Search results from multiple engines improve retrieval quality for production applications."),
+			source("b.example", "These results summarize documents and ranking signals for production applications."),
+		];
+		const coverage = evaluateCoverage("search engines", "identify LTS", sources);
+		assert.deepEqual(coverage.coveredGoalTerms, []);
+		assert.deepEqual(coverage.uncoveredGoalTerms, ["lts"]);
+	});
+
+	it("does not corroborate excerpts whose version facts conflict", () => {
+		const sources = [
+			source("a.example", `Node.js 22 is the Active LTS release for production applications in ${staleYear}.`),
+			source("b.example", `Node.js 24 is the Active LTS release for production applications in ${recentYear}.`),
+		];
+		applyCorroboration(sources, "current Node.js LTS release", true);
+		assert.deepEqual(sources.map((s) => s.corroboratedBy), [[], []]);
 	});
 });
 
@@ -316,6 +538,45 @@ describe("url + domain helpers", () => {
 
 describe("JsonCache", () => {
 	const tmpFile = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), "sb-cache-")), "cache.json");
+
+	it("serializes genuinely concurrent cross-process merges", { timeout: 15_000 }, async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sb-cache-race-"));
+		const file = path.join(dir, "cache.json");
+		const go = path.join(dir, "go");
+		const modulePath = fileURLToPath(new URL("../lib/cache.ts", import.meta.url));
+		const script = `
+			import fs from "node:fs";
+			import { pathToFileURL } from "node:url";
+			const [modulePath, cacheFile, key, ready, go] = process.argv.slice(1);
+			const { JsonCache } = await import(pathToFileURL(modulePath).href);
+			const cache = new JsonCache(cacheFile);
+			cache.set(key, key, 3600);
+			fs.writeFileSync(ready, "ready");
+			while (!fs.existsSync(go)) await new Promise((resolve) => setTimeout(resolve, 5));
+			cache.flush();
+		`;
+		const launch = (key: string) => {
+			const ready = path.join(dir, `${key}.ready`);
+			const child = spawn(process.execPath, ["--experimental-strip-types", "-e", script, modulePath, file, key, ready, go], {
+				stdio: ["ignore", "pipe", "pipe"],
+			});
+			return { child, ready };
+		};
+		const children = [launch("a"), launch("b")];
+		const deadline = Date.now() + 5000;
+		while (!children.every((entry) => fs.existsSync(entry.ready)) && Date.now() < deadline) {
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		assert.ok(children.every((entry) => fs.existsSync(entry.ready)), "workers did not reach the flush barrier");
+		fs.writeFileSync(go, "go");
+		const exits = await Promise.all(children.map(({ child }) => new Promise<number>((resolve) => {
+			child.on("close", (code) => resolve(code ?? 1));
+		})));
+		assert.deepEqual(exits, [0, 0]);
+		const stored = JSON.parse(fs.readFileSync(file, "utf8"));
+		assert.deepEqual(Object.keys(stored).sort(), ["a", "b"]);
+		fs.rmSync(dir, { recursive: true, force: true });
+	});
 
 	it("merges entries written by another process instead of overwriting them", () => {
 		const file = tmpFile();
@@ -368,7 +629,74 @@ describe("x_search JSON extraction", () => {
 });
 
 describe("research_parallel extension path", () => {
+	it("does not spawn queued Pi children when already cancelled", async () => {
+		const controller = new AbortController();
+		controller.abort(new Error("stop parallel work"));
+		const started = Date.now();
+		const report = await runParallelResearch({
+			query: "cancelled",
+			subtasks: ["one", "two", "three"],
+			maxParallel: 1,
+			signal: controller.signal,
+		});
+		assert.ok(Date.now() - started < 500, "pre-aborted work should not wait on child termination");
+		assert.equal(report.okCount, 0);
+		assert.ok(report.results.every((result) => result.error === "aborted by caller"));
+	});
+
 	it("resolves index.ts next to the package root (npm / manual / git)", () => {
 		assert.ok(fs.existsSync(SEARCH_BOOST_EXT), `expected extension entry at ${SEARCH_BOOST_EXT}`);
+	});
+
+	it("extracts real cited URLs and domains from the final report", () => {
+		assert.deepEqual(
+			extractSourceUrls("See https://example.com/a?utm_source=x and [docs](https://docs.example.org/v1). Duplicate: https://example.com/a. Also https://en.wikipedia.org/wiki/Foo_(bar)."),
+			["https://example.com/a", "https://docs.example.org/v1", "https://en.wikipedia.org/wiki/Foo_(bar)"],
+		);
+	});
+
+	it("recognizes WebSocket/provider transport failures for serial retry", () => {
+		assert.ok(isTransientProviderTransportError("WebSocket error"));
+		assert.ok(isTransientProviderTransportError("read ECONNRESET"));
+		assert.equal(isTransientProviderTransportError("tool schema invalid"), false);
+	});
+
+	it("retries transient WebSocket failures serially and replaces successful results", async () => {
+		const failed = (subtask: string): SubtaskResult => ({
+			subtask, ok: false, result: "WebSocket error", error: "WebSocket error",
+			tookMs: 1, turns: 0, attempts: 1, sources: [], domains: [],
+		});
+		const results = [failed("a"), failed("b")];
+		let active = 0;
+		let maxActive = 0;
+		await retryTransientSubtasks(results, undefined, undefined, async (subtask) => {
+			active++;
+			maxActive = Math.max(maxActive, active);
+			await new Promise((resolve) => setTimeout(resolve, 5));
+			active--;
+			return {
+				subtask, ok: true, result: `done ${subtask}`, tookMs: 2, turns: 1,
+				attempts: 1, sources: [`https://${subtask}.example/source`], domains: [`${subtask}.example`],
+			};
+		});
+		assert.equal(maxActive, 1);
+		assert.ok(results.every((result) => result.ok && result.attempts === 2));
+	});
+
+	it("never reports a killed child with partial assistant output as successful", () => {
+		assert.equal(childAttemptSucceeded({
+			exitCode: 1,
+			terminationRequested: true,
+			errorMessage: "timeout after 30s",
+			stopReason: "stop",
+			result: "partial report",
+		}), false);
+		assert.equal(childAttemptSucceeded({
+			exitCode: 0,
+			terminationRequested: false,
+			errorMessage: "",
+			stopReason: "stop",
+			result: "complete report",
+		}), true);
 	});
 });

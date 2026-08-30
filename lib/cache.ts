@@ -10,6 +10,70 @@ interface CacheEntry {
 	data: unknown;
 }
 
+const LOCK_STALE_MS = 15_000;
+const LOCK_WAIT_MS = 3_000;
+const sleepArray = new Int32Array(new SharedArrayBuffer(4));
+
+interface FileLock {
+	fd: number;
+	token: string;
+}
+
+function processIsAlive(pid: number): boolean {
+	if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+function lockOwner(raw: string): { pid?: number; token?: string } {
+	try {
+		return JSON.parse(raw) as { pid?: number; token?: string };
+	} catch {
+		return {};
+	}
+}
+
+function acquireFileLock(lockPath: string): FileLock | null {
+	const deadline = Date.now() + LOCK_WAIT_MS;
+	while (Date.now() < deadline) {
+		try {
+			const fd = fs.openSync(lockPath, "wx", 0o600);
+			const token = JSON.stringify({
+				pid: process.pid,
+				token: `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+			});
+			fs.writeFileSync(fd, token);
+			return { fd, token };
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") return null;
+			try {
+				if (Date.now() - fs.statSync(lockPath).mtimeMs > LOCK_STALE_MS) {
+					const observed = fs.readFileSync(lockPath, "utf8");
+					const owner = lockOwner(observed);
+					// A slow but live writer still owns the lock. Only recover locks
+					// whose process is gone (or legacy/corrupt locks with no owner).
+					if (owner.pid && processIsAlive(owner.pid)) {
+						Atomics.wait(sleepArray, 0, 0, 20);
+						continue;
+					}
+					// Re-read before unlink so a successor token is never removed
+					// based on stale observations from an earlier owner.
+					if (fs.readFileSync(lockPath, "utf8") === observed) fs.unlinkSync(lockPath);
+					continue;
+				}
+			} catch {
+				continue;
+			}
+			Atomics.wait(sleepArray, 0, 0, 20);
+		}
+	}
+	return null;
+}
+
 export class JsonCache {
 	private data = new Map<string, CacheEntry>();
 	private hits = 0;
@@ -79,8 +143,15 @@ export class JsonCache {
 			clearTimeout(this.saveTimer);
 			this.saveTimer = null;
 		}
+		let lock: FileLock | null = null;
+		const lockPath = `${this.file}.lock`;
 		try {
 			fs.mkdirSync(path.dirname(this.file), { recursive: true });
+			lock = acquireFileLock(lockPath);
+			if (lock === null) {
+				this.scheduleSave();
+				return;
+			}
 			const now = Date.now();
 			const merged = new Map<string, CacheEntry>();
 			if (!this.cleared) {
@@ -103,6 +174,14 @@ export class JsonCache {
 			this.saves++;
 		} catch {
 			// best-effort persistence
+		} finally {
+			if (lock !== null) {
+				try { fs.closeSync(lock.fd); } catch { /* already closed */ }
+				try {
+					// Never unlink a lock acquired by a successor after recovery.
+					if (fs.readFileSync(lockPath, "utf8") === lock.token) fs.unlinkSync(lockPath);
+				} catch { /* best effort */ }
+			}
 		}
 	}
 }

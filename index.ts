@@ -384,12 +384,15 @@ During coding / development work, search BEFORE you write — never write code a
 				ts: new Date().toISOString(),
 				query: params.query,
 				mode: "parallel",
-				rounds: res.results.length,
+				rounds: 1,
 				stopReason: `${res.okCount}/${res.results.length} subtasks ok`,
-				sources: res.results.reduce((n, r) => n + r.turns, 0),
-				domains: 0,
+				sources: res.sourceUrls.length,
+				domains: res.domains.length,
 				uncovered: [],
 				tookMs: Date.now() - started,
+				subtasks: res.results.length,
+				successfulSubtasks: res.okCount,
+				turns: res.totalTurns,
 			});
 			const lines: string[] = [
 				`Parallel research: "${res.query}" — ${res.okCount}/${res.results.length} subtasks completed in ${(res.totalMs / 1000).toFixed(1)}s`,
@@ -400,7 +403,7 @@ During coding / development work, search BEFORE you write — never write code a
 				if (!r.ok) {
 					lines.push(`[FAILED in ${(r.tookMs / 1000).toFixed(1)}s: ${r.error}]`);
 				} else {
-					lines.push(`(${(r.tookMs / 1000).toFixed(1)}s, ${r.turns} turns)`);
+					lines.push(`(${(r.tookMs / 1000).toFixed(1)}s, ${r.turns} turns${r.attempts > 1 ? `, ${r.attempts} attempts` : ""}, ${r.sources.length} cited sources)`);
 				}
 				lines.push(r.result);
 				lines.push("");
@@ -410,8 +413,11 @@ During coding / development work, search BEFORE you write — never write code a
 				content: [{ type: "text", text: lines.join("\n").trim() }],
 				details: {
 					results: res.results.map((r) => ({
-						subtask: r.subtask, ok: r.ok, tookMs: r.tookMs, turns: r.turns, error: r.error,
+						subtask: r.subtask, ok: r.ok, tookMs: r.tookMs, turns: r.turns,
+						attempts: r.attempts, sources: r.sources, domains: r.domains, error: r.error,
 					})),
+					sourceUrls: res.sourceUrls,
+					domains: res.domains,
 				},
 			};
 		},
@@ -423,12 +429,12 @@ During coding / development work, search BEFORE you write — never write code a
 		name: "deep_research",
 		label: "Deep Research",
 		description:
-			"Multi-round research loop for questions needing depth and multiple sources. Each round: fused search -> fetch the top unseen pages -> extract query-relevant excerpts -> coverage check -> generate follow-up queries from new material. Stops when coverage is reached (no new domains, source cap, terms covered, or round cap). Returns a report with per-source excerpts, corroboration (which other domains' excerpts share distinctive terms), coverage stats, and suggested follow-up queries.\n\nMode auto: runs the full loop up to max_rounds. Mode step: runs one round and returns gaps + suggested queries so you can drive the next round yourself with new `queries` (Grok-style). For any answer you produce from this report, cite source URLs and require >=2 independent domains for key claims (see corroboratedBy); mark single-source claims as unverified.",
+			"Multi-round research loop for questions needing depth and multiple sources. Each round: fused search -> fetch top unseen pages -> extract query/goal-relevant evidence -> evidence coverage check -> follow-up queries. Query coverage is based only on selected excerpts; goal terms require >=2 independent domains. Time-sensitive goals additionally require recent dated, claim-aligned evidence. The loop does not perform an LLM semantic goal check and never claims that word coverage alone proves the goal. `corroboratedBy` is conservative claim-segment alignment using shared factual anchors, not proof.\n\nMode auto runs up to max_rounds. Mode step runs one round and returns gaps + suggested queries. Cite source URLs and independently verify key claims; treat single-source claims as unverified.",
 		promptSnippet: "Run a multi-round deep research loop with coverage checking and corroboration",
 		promptGuidelines: [
 			"deep_research: use it for questions that need depth and multiple independent sources — it iterates search+fetch rounds until coverage, then reports per-source excerpts with corroboration.",
 			"deep_research citations: every factual claim in your answer must cite source URL(s) from the research report; do not cite pages that are not in the report.",
-			"deep_research corroboration: for key claims require >=2 independent domains (see corroboratedBy); if a claim is supported by only one source, explicitly mark it as single-source / unverified.",
+			"deep_research corroboration: corroboratedBy is heuristic claim alignment, not proof. For key claims inspect the excerpts and require >=2 independent domains; mark single-source claims as unverified.",
 			"deep_research source hierarchy: prefer primary sources (official documentation, papers, raw data, .gov/.edu) over secondary ones (news, blogs); note when a claim rests on a secondary source.",
 			"deep_research freshness: for time-sensitive facts, state the access date (fetchedAt) and prefer recently fetched sources.",
 			"deep_research step mode: when mode=step, the report lists uncovered terms and suggested queries — call deep_research again with those queries in `queries` to continue until coverage is reached.",
@@ -440,7 +446,7 @@ During coding / development work, search BEFORE you write — never write code a
 					description: "Keyword variants for this round (step-mode continuation). If omitted, variants are derived from query.",
 				}),
 			),
-			goal: Type.Optional(Type.String({ description: "What the final answer must establish; used to judge coverage" })),
+			goal: Type.Optional(Type.String({ description: "What the final answer must establish; drives search, excerpt selection, and multi-domain evidence coverage. Semantic goal satisfaction is left to the calling model." })),
 			mode: Type.Optional(StringEnum(["auto", "step"], { default: "auto" })),
 			max_rounds: Type.Optional(Type.Integer({ minimum: 1, maximum: 5, default: 3 })),
 			max_sources: Type.Optional(Type.Integer({ minimum: 2, maximum: 15, default: 8 })),
@@ -484,7 +490,7 @@ During coding / development work, search BEFORE you write — never write code a
 				stopReason: res.stopReason,
 				sources: res.coverage.totalSources,
 				domains: res.coverage.distinctDomains,
-				uncovered: res.coverage.uncoveredTerms,
+				uncovered: [...res.coverage.uncoveredTerms, ...res.coverage.uncoveredGoalTerms],
 				tookMs: res.tookMs,
 			});
 
@@ -492,8 +498,12 @@ During coding / development work, search BEFORE you write — never write code a
 				`Research report: "${res.query}"`,
 				res.goal ? `Goal: ${res.goal}` : "",
 				`Rounds: ${res.rounds} — stopped: ${res.stopReason} — sources: ${res.coverage.totalSources} — domains: ${res.coverage.distinctDomains} — ${res.tookMs}ms`,
-				`Covered terms: ${res.coverage.coveredTerms.join(", ") || "(none)"}`,
-				`Uncovered terms: ${res.coverage.uncoveredTerms.join(", ") || "(none)"}`,
+				`Query evidence terms covered: ${res.coverage.coveredTerms.join(", ") || "(none)"}`,
+				`Query evidence terms uncovered: ${res.coverage.uncoveredTerms.join(", ") || "(none)"}`,
+				res.goal ? `Goal evidence terms (>=2 domains): ${res.coverage.coveredGoalTerms.join(", ") || "(none)"}` : "",
+				res.goal ? `Goal evidence gaps: ${res.coverage.uncoveredGoalTerms.join(", ") || "(none)"}` : "",
+				res.goal ? `Goal evidence covered: ${res.coverage.goalEvidenceCovered ? "yes" : "no"}; semantic goal check: not performed` : "",
+				`Corroboration method: ${res.corroborationMethod}`,
 				res.coverage.primaryDomains.length > 0 ? `Primary/authoritative domains: ${res.coverage.primaryDomains.join(", ")}` : "",
 				"",
 				"Sources:",
@@ -503,9 +513,9 @@ During coding / development work, search BEFORE you write — never write code a
 					`${i + 1}. ${s.title} — ${s.domain} [via ${s.via}, ${s.fetchedAt.slice(0, 10)}, ${s.wordCount} words]`,
 					`   URL: ${s.url}`,
 					s.corroboratedBy.length > 0
-						? `   corroborated by: ${s.corroboratedBy.join(", ")}`
-						: "   corroborated by: (none — single-source claim, treat as unverified)",
-					s.excerpt ? `   Excerpt: ${s.excerpt.slice(0, 600)}` : "",
+						? `   claim-aligned domains (heuristic): ${s.corroboratedBy.join(", ")}`
+						: "   claim-aligned domains: (none — single-source claim, treat as unverified)",
+					s.excerpt ? `   Evidence excerpt used for coverage/alignment: ${s.excerpt}` : "",
 					"",
 				);
 			});
@@ -522,7 +532,11 @@ During coding / development work, search BEFORE you write — never write code a
 				content: [{ type: "text", text: lines.join("\n").trim() }],
 				details: {
 					coverage: res.coverage,
-					sources: res.sources.map((s) => ({ url: s.url, domain: s.domain, corroboratedBy: s.corroboratedBy })),
+					sources: res.sources.map((s) => ({
+						title: s.title, url: s.url, domain: s.domain, fetchedAt: s.fetchedAt,
+						excerpt: s.excerpt, corroboratedBy: s.corroboratedBy,
+						freshCorroboratedBy: s.freshCorroboratedBy ?? [],
+					})),
 					engineStats: res.engineStats,
 					cacheHits: res.cacheHits,
 					suggestedQueries: res.suggestedQueries,

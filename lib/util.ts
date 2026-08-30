@@ -3,7 +3,9 @@
  * URL normalization, text tokenization, and a tiny concurrency pool.
  * Zero dependencies — node built-ins only.
  */
-import { lookup } from "node:dns/promises";
+import { lookup as lookupPromise } from "node:dns/promises";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
 
 export const STOPWORDS = new Set([
@@ -23,43 +25,179 @@ export interface FetchedText {
 	status: number;
 	text: string;
 	contentType?: string;
+	finalUrl?: string;
 }
 
-/** Fetch with external-signal + timeout support (node 20+: AbortSignal.any). */
+/** Combine caller cancellation with a timeout, preserving the first abort reason. */
+export function signalWithTimeout(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
+	const timeout = AbortSignal.timeout(timeoutMs);
+	if (!signal) return timeout;
+	if (signal.aborted) return signal;
+	if (typeof AbortSignal.any === "function") return AbortSignal.any([signal, timeout]);
+	const controller = new AbortController();
+	const inputs = [signal, timeout];
+	const cleanup = () => inputs.forEach((s) => s.removeEventListener("abort", onAbort));
+	const onAbort = (event: Event) => {
+		cleanup();
+		const source = event.target as AbortSignal;
+		controller.abort(source.reason);
+	};
+	inputs.forEach((s) => s.addEventListener("abort", onAbort, { once: true }));
+	return controller.signal;
+}
+
+/** Throw consistently when the caller cancelled an operation. */
+export function throwIfAborted(signal?: AbortSignal): void {
+	if (!signal?.aborted) return;
+	if (signal.reason instanceof Error) throw signal.reason;
+	throw new Error("aborted");
+}
+
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+const MAX_PUBLIC_FETCH_BYTES = 5 * 1024 * 1024;
+
+interface PublicResponse {
+	status: number;
+	text: string;
+	contentType?: string;
+	location?: string;
+}
+
+/**
+ * GET an untrusted public URL through node:http(s) with a guarded lookup
+ * callback. The address approved by the guard is the address the socket uses,
+ * closing the DNS check/connect rebinding gap while retaining Host/SNI.
+ */
+async function requestPublicText(
+	rawUrl: string,
+	headers: Record<string, string>,
+	signal: AbortSignal,
+): Promise<PublicResponse> {
+	const { url } = parsePublicHttpUrl(rawUrl);
+	const lookup = (
+		hostname: string,
+		options: { family?: number; all?: boolean },
+		callback: (error: NodeJS.ErrnoException | null, address?: string | Array<{ address: string; family: number }>, family?: number) => void,
+	) => {
+		resolvePublicAddresses(hostname, signal).then(
+			(addresses) => {
+				const requested = options?.family;
+				const candidates = requested ? addresses.filter((entry) => entry.family === requested) : addresses;
+				const selected = candidates[0] ?? addresses[0];
+				if (!selected) {
+					callback(Object.assign(new Error("blocked url: cannot resolve host"), { code: "ENOTFOUND" }));
+					return;
+				}
+				if (options?.all) callback(null, candidates.length > 0 ? candidates : addresses);
+				else callback(null, selected.address, selected.family);
+			},
+			(error) => callback(error as NodeJS.ErrnoException),
+		);
+	};
+	return new Promise<PublicResponse>((resolve, reject) => {
+		const requester = url.protocol === "https:" ? httpsRequest : httpRequest;
+		const req = requester(url, { method: "GET", headers, signal, lookup: lookup as never }, (res) => {
+			const chunks: Buffer[] = [];
+			let bytes = 0;
+			let settled = false;
+			res.on("data", (chunk: Buffer | string) => {
+				const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+				bytes += buffer.length;
+				if (bytes > MAX_PUBLIC_FETCH_BYTES) {
+					settled = true;
+					res.destroy(new Error(`response too large (>${MAX_PUBLIC_FETCH_BYTES} bytes)`));
+					return;
+				}
+				chunks.push(buffer);
+			});
+			res.on("end", () => {
+				if (settled) return;
+				settled = true;
+				resolve({
+					status: res.statusCode ?? 0,
+					text: Buffer.concat(chunks).toString("utf8"),
+					contentType: typeof res.headers["content-type"] === "string" ? res.headers["content-type"] : undefined,
+					location: typeof res.headers.location === "string" ? res.headers.location : undefined,
+				});
+			});
+			res.on("error", (error) => {
+				if (!settled) reject(error);
+			});
+		});
+		req.on("error", reject);
+		req.end();
+	});
+}
+
+/**
+ * Fetch text with caller cancellation and a timeout. Untrusted page URLs use a
+ * DNS-pinned node:http(s) transport and manually validated redirects; trusted
+ * fixed service endpoints retain standard fetch behavior.
+ */
 export async function fetchText(
 	url: string,
-	opts: { timeoutMs?: number; headers?: Record<string, string>; signal?: AbortSignal } = {},
+	opts: {
+		timeoutMs?: number;
+		headers?: Record<string, string>;
+		signal?: AbortSignal;
+		publicRedirects?: boolean;
+		maxRedirects?: number;
+	} = {},
 ): Promise<FetchedText> {
-	const timeoutMs = opts.timeoutMs ?? 15000;
-	const signals = [opts.signal, AbortSignal.timeout(timeoutMs)].filter(
-		(s): s is AbortSignal => s !== undefined && !s.aborted,
-	);
-	const controller = new AbortController();
-	const onAbort = () => controller.abort();
-	if (opts.signal) opts.signal.addEventListener("abort", onAbort, { once: true });
-	if (signals.length > 0) {
-		signals[signals.length - 1].addEventListener("abort", () => controller.abort(), { once: true });
-	}
-	try {
-		const res = await fetch(url, {
-			headers: {
-				"User-Agent":
-					"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
-				Accept: "text/html,text/plain,application/json,*/*",
-				...opts.headers,
-			},
-			signal: controller.signal,
-			redirect: "follow",
-		});
+	const signal = signalWithTimeout(opts.signal, opts.timeoutMs ?? 15000);
+	const headers: Record<string, string> = {
+		"User-Agent":
+			"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+		Accept: "text/html,text/plain,application/json,*/*",
+		...opts.headers,
+	};
+	if (!opts.publicRedirects) {
+		const res = await fetch(url, { headers, signal, redirect: "follow" });
 		return {
 			ok: res.ok,
 			status: res.status,
 			text: await res.text(),
 			contentType: res.headers.get("content-type") ?? undefined,
+			finalUrl: res.url || url,
 		};
-	} finally {
-		if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
 	}
+
+	let currentUrl = url;
+	const maxRedirects = Math.min(10, Math.max(0, opts.maxRedirects ?? 5));
+	for (let redirects = 0; ; redirects++) {
+		throwIfAborted(signal);
+		const res = await requestPublicText(currentUrl, headers, signal);
+		if (!REDIRECT_STATUSES.has(res.status)) {
+			return {
+				ok: res.status >= 200 && res.status < 300,
+				status: res.status,
+				text: res.text,
+				contentType: res.contentType,
+				finalUrl: currentUrl,
+			};
+		}
+		if (redirects >= maxRedirects) throw new Error(`too many redirects (>${maxRedirects})`);
+		if (!res.location) {
+			return { ok: false, status: res.status, text: res.text, contentType: res.contentType, finalUrl: currentUrl };
+		}
+		currentUrl = await validatePublicRedirect(currentUrl, res.location, signal);
+	}
+}
+
+/** Resolve a redirect Location and apply the same public-network policy. */
+export async function validatePublicRedirect(
+	currentUrl: string,
+	location: string,
+	signal?: AbortSignal,
+): Promise<string> {
+	let nextUrl: string;
+	try {
+		nextUrl = new URL(location, currentUrl).toString();
+	} catch {
+		throw new Error("blocked redirect: invalid Location URL");
+	}
+	await assertPublicHttpUrl(nextUrl, signal);
+	return nextUrl;
 }
 
 const ENTITY_MAP: Record<string, string> = {
@@ -183,6 +321,25 @@ export function queryTerms(query: string): string[] {
 	return tokenize(query);
 }
 
+/** Boundary-aware term match: Latin `lts` must not match `results`; CJK stays substring-based. */
+export function containsSearchTerm(text: string, term: string): boolean {
+	if (!term) return false;
+	if (CJK_CHAR.test(term)) return text.includes(term);
+	const escaped = term.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const start = /^[a-z0-9]/i.test(term) ? "(?:^|[^a-z0-9])" : "";
+	const end = /[a-z0-9]$/i.test(term) ? "(?=$|[^a-z0-9])" : "";
+	return new RegExp(`${start}${escaped}${end}`, "i").test(text.toLowerCase());
+}
+
+/** Boundary-aware global matcher for relevance scoring. */
+export function searchTermRegExp(term: string): RegExp {
+	const escaped = term.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	if (CJK_CHAR.test(term)) return new RegExp(escaped, "g");
+	const start = /^[a-z0-9]/i.test(term) ? "(?:^|[^a-z0-9])" : "";
+	const end = /[a-z0-9]$/i.test(term) ? "(?=$|[^a-z0-9])" : "";
+	return new RegExp(`${start}${escaped}${end}`, "g");
+}
+
 /** Normalize a URL for dedup: lower host, strip www./tracking params/trailing slash/hash. */
 export function normalizeUrl(raw: string): string {
 	try {
@@ -293,63 +450,83 @@ export function isTunFakeIp(ip: string): boolean {
 	return a === 198 && (b === 18 || b === 19);
 }
 
-/** Opt out of the TUN carve-out (defense in depth) with PI_SEARCH_ALLOW_TUN_FAKEIP=0. */
-const ALLOW_TUN_FAKE_IP = process.env.PI_SEARCH_ALLOW_TUN_FAKEIP !== "0";
+/** Explicit opt-in: fake-IP DNS is private-range routing and must not be allowed by default. */
+const ALLOW_TUN_FAKE_IP = process.env.PI_SEARCH_ALLOW_TUN_FAKEIP === "1";
 
 const BLOCKED_HOST_SUFFIXES = [".localhost", ".local", ".internal", ".lan", ".home"];
 
+interface DnsAddress {
+	address: string;
+	family: number;
+}
+
+async function lookupWithAbort(host: string, signal?: AbortSignal): Promise<DnsAddress[]> {
+	throwIfAborted(signal);
+	const pending = lookupPromise(host, { all: true }) as Promise<DnsAddress[]>;
+	if (!signal) return pending;
+	let onAbort: (() => void) | undefined;
+	const aborted = new Promise<never>((_resolve, reject) => {
+		onAbort = () => reject(signal.reason instanceof Error ? signal.reason : new Error("aborted"));
+		signal.addEventListener("abort", onAbort, { once: true });
+	});
+	try {
+		return await Promise.race([pending, aborted]);
+	} finally {
+		if (onAbort) signal.removeEventListener("abort", onAbort);
+	}
+}
+
+/** Resolve and reject any private answer. Returned addresses are safe to pin to a socket. */
+async function resolvePublicAddresses(host: string, signal?: AbortSignal): Promise<DnsAddress[]> {
+	const results = await lookupWithAbort(host, signal);
+	if (results.length === 0) throw new Error("blocked url: cannot resolve host");
+	const viaTun = ALLOW_TUN_FAKE_IP && results.every((result) => isTunFakeIp(result.address));
+	if (!viaTun) {
+		for (const result of results) {
+			if (isPrivateOrLocalIp(result.address)) {
+				throw new Error(`blocked url: resolves to private IP ${result.address}`);
+			}
+		}
+	}
+	return results;
+}
+
 /**
  * Reject URLs that would let fetch_page hit loopback, private networks, or
- * cloud metadata. DNS is resolved so names that rebind to 127.0.0.1 are caught.
+ * cloud metadata. `fetchText(publicRedirects)` additionally pins an address
+ * returned by this guard into the actual socket lookup to defeat rebinding.
  */
-export async function assertPublicHttpUrl(raw: string): Promise<void> {
-	let u: URL;
+export async function assertPublicHttpUrl(raw: string, signal?: AbortSignal): Promise<void> {
+	const { host } = parsePublicHttpUrl(raw);
+	if (isIP(host)) return;
 	try {
-		u = new URL(raw);
+		await resolvePublicAddresses(host, signal);
+	} catch (err) {
+		throwIfAborted(signal);
+		if (err instanceof Error && err.message.startsWith("blocked url:")) throw err;
+		throw new Error("blocked url: cannot resolve host");
+	}
+}
+
+function parsePublicHttpUrl(raw: string): { url: URL; host: string } {
+	let url: URL;
+	try {
+		url = new URL(raw);
 	} catch {
 		throw new Error("blocked url: invalid URL");
 	}
-	if (u.protocol !== "http:" && u.protocol !== "https:") {
+	if (url.protocol !== "http:" && url.protocol !== "https:") {
 		throw new Error("blocked url: only http(s) allowed");
 	}
-	if (u.username || u.password) {
-		throw new Error("blocked url: userinfo not allowed");
-	}
-	const host = u.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+	if (url.username || url.password) throw new Error("blocked url: userinfo not allowed");
+	const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
 	if (!host) throw new Error("blocked url: empty host");
 	if (
 		host === "localhost" ||
 		host === "metadata.google.internal" ||
-		BLOCKED_HOST_SUFFIXES.some((s) => host === s.slice(1) || host.endsWith(s))
-	) {
-		throw new Error("blocked url: private/local host");
-	}
-	if (/^\d+$/.test(host)) {
-		throw new Error("blocked url: numeric host");
-	}
-	if (isIP(host)) {
-		if (isPrivateOrLocalIp(host)) throw new Error("blocked url: private IP");
-		return;
-	}
-	try {
-		const results = await lookup(host, { all: true });
-		// TUN fake-ip environment: every A answer lands in 198.18/15 and nothing
-		// else is private — the connection goes through the TUN device, so allow.
-		// Anything mixed (loopback / RFC1918 / metadata) still blocks below.
-		const viaTun =
-			ALLOW_TUN_FAKE_IP &&
-			results.length > 0 &&
-			results.some((r) => isTunFakeIp(r.address)) &&
-			results.every((r) => isPrivateOrLocalIp(r.address) === isTunFakeIp(r.address));
-		if (!viaTun) {
-			for (const r of results) {
-				if (isPrivateOrLocalIp(r.address)) {
-					throw new Error(`blocked url: resolves to private IP ${r.address}`);
-				}
-			}
-		}
-	} catch (err) {
-		if (err instanceof Error && err.message.startsWith("blocked url:")) throw err;
-		throw new Error("blocked url: cannot resolve host");
-	}
+		BLOCKED_HOST_SUFFIXES.some((suffix) => host === suffix.slice(1) || host.endsWith(suffix))
+	) throw new Error("blocked url: private/local host");
+	if (/^\d+$/.test(host)) throw new Error("blocked url: numeric host");
+	if (isIP(host) && isPrivateOrLocalIp(host)) throw new Error("blocked url: private IP");
+	return { url, host };
 }

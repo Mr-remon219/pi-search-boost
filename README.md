@@ -23,9 +23,9 @@ On the **free** layer, keyless Exa MCP runs alone; the **api** layer fuses Tavil
 - **Fused multi-engine search** — Tavily + Brave API + Exa in parallel (HTML scrapers retired)
 - **Cross-engine ranking** — deduplicated by URL, cross-ranked by engine agreement and domain quality, with per-domain soft diversity decay; a result found by 2+ independent engines is high-confidence, single-engine noise is demoted
 - **Complexity routing** — search budget bound to query complexity: `simple` = 1 variant × 2 engines (Tavily + Brave, 1 credit), `medium`/`complex` = 2–3 variants × Tavily + Brave + Exa (`complex` uses Tavily advanced, 2 credits)
-- **Focus-filtered page reading** — `fetch_page` with a `focus` parameter keeps only query-relevant paragraphs (measured ~95% token savings)
-- **Deep research loop** — search → fetch → extract → coverage check → follow-up queries → converge, with per-source corroboration (≥2 independent domains for key claims)
-- **Parallel multi-agent research** — decompose a question into 2-4 subtasks, each run as an independent pi subprocess with its own search budget
+- **Focus-filtered page reading** — `fetch_page` ranks unique concept coverage, preserves release/status tables and bounded context, and keeps only query-relevant paragraphs (measured ~95% token savings)
+- **Evidence-based deep research** — search → fetch → goal-aware evidence extraction → multi-domain coverage → follow-ups; coverage is excerpt-only, and claim alignment uses exact version/date/measure anchors while semantic goal judgment remains with the model
+- **Parallel multi-agent research** — decompose a question into 2-4 independent pi subprocesses; duplicate extension loading is prevented and transient WebSocket/provider failures retry serially
 - **Real-time X/Twitter search** — `x_search`: the hosted x_search tool (grok login / `XAI_API_KEY`) runs ∥ the fused multi-engine route in parallel, results merged and deduped; structured user profiles via X's anonymous guest GraphQL; oEmbed full-text; works with no credentials at all (~2s via multi-engine fallback)
 - **Caching** — search results (6h) and pages (24h) persist to disk; hot cache hits are ~1ms, cross-process
 - **Audit & observability** — every search/fetch/research event logged (JSONL, 5MB rotation) with tier, credits estimate, engine errors, timings; `/search-audit` and `/search-cache` commands in the TUI
@@ -35,7 +35,7 @@ On the **free** layer, keyless Exa MCP runs alone; the **api** layer fuses Tavil
 
 ## Install — let pi do it
 
-**Prerequisites:** pi installed (v0.84 or newer recommended; the extension uses `pi.registerTool` and the `before_agent_start` system-prompt injection). No build step, no bundler.
+**Prerequisites:** pi v0.84+ and Node.js 22.6+ (the published test runner uses native TypeScript stripping). No build step or bundler is required for the extension.
 
 ### Option A: install from npm (recommended)
 
@@ -49,7 +49,7 @@ pi -e npm:pi-search-boost -p "fused_search 'tokio latest version'"
 pi install npm:pi-search-boost
 ```
 
-Then restart pi or run `/reload`. To update later: `pi update npm:pi-search-boost` (pinned version specs are skipped — install an explicit version to move: `pi install npm:pi-search-boost@0.1.0`).
+Then restart pi or run `/reload`. To update later: `pi update npm:pi-search-boost` (pinned version specs are skipped — move to the current release with `pi install npm:pi-search-boost@latest`).
 
 ### Option B: one-command install from git
 
@@ -125,7 +125,7 @@ Keys are **environment variables** (the extension does not read `.env` files):
 | `PI_SEARCH_BRAVE_KEY` | Brave | Keyword search with operators |
 | `PI_SEARCH_CACHE_TTL` | — | Search cache TTL in seconds (default `21600`, 6h) |
 | `PI_SEARCH_PAGE_TTL` | — | Page cache TTL in seconds (default `86400`, 24h) |
-| `PI_SEARCH_ALLOW_TUN_FAKEIP` | — | Set to `0` to disable the Clash/sing-box TUN fake-ip carve-out (default enabled) |
+| `PI_SEARCH_ALLOW_TUN_FAKEIP` | — | Set to `1` to opt into the Clash/sing-box TUN fake-ip carve-out (default disabled) |
 
 Key registration: [Tavily](https://tavily.com) (1000 free credits/mo) · [Exa](https://exa.ai) · [Brave](https://brave.com/search/api/)
 
@@ -167,9 +167,9 @@ Manual installs: update by re-running `install.bat`/`install.sh`; uninstall with
 | Tool | What it does |
 | --- | --- |
 | `fused_search` | Multi-engine search: keyword variants × engines in parallel → URL dedupe → cross-engine scoring → ranked hits with per-result engine provenance, publish dates, and full content (Tavily advanced / Exa) for direct consumption |
-| `fetch_page` | Reader-mode fetch: Jina Reader (keyless) → local heuristic extractor fallback → headless-browser engine for thin pages. `focus` parameter filters to relevant paragraphs (80-95% token savings) |
-| `deep_research` | Multi-round loop with coverage checking, per-source corroboration, primary-source hierarchy, and freshness. `mode=step` returns gaps + suggested queries for agent-driven iteration |
-| `research_parallel` | 2-4 independent subagents (pi child processes) each with its own search budget, run in parallel, then synthesize with cross-source verification |
+| `fetch_page` | Reader-mode fetch with redirect-safe SSRF checks, Jina/local/browser extraction, and concept-ranked focus filtering that preserves relevant tables/context |
+| `deep_research` | Goal-aware multi-round evidence loop. Query terms are checked only in selected excerpts; goal terms require ≥2 domains, temporal goals require recent claim-aligned evidence, and semantic satisfaction is explicitly not auto-claimed |
+| `research_parallel` | 2-4 independent pi children with real cited-source auditing, bounded stderr diagnostics, and serial retry for transient WebSocket/provider failures |
 | `x_search` | Real-time X/Twitter search (posts, users, threads). keyword/semantic run the hosted x_search tool ∥ the fused multi-engine route in parallel and merge results; works with or without credentials (multi-engine + oEmbed fallback; guest GraphQL for structured user profiles) |
 
 ### fused_search parameters
@@ -282,8 +282,8 @@ lib/util.ts     fetch with timeout/signal, HTML decoding, URL normalization, CJK
 
 ## Development history
 
-23 measured iterations (see the repo commit history): from single-engine Bing scraping → 4-engine fusion with complexity routing → focus-filtered reading (95% token savings) → deep research with corroboration → parallel subagents → proactive-search policy (v3: anti-over-search stop rules; v4: autonomy/fallback rules) → audit fixes → **round 23: TUN fake-ip carve-out (Clash TUN answers every DNS query with 198.18/15; the SSRF guard now allows an all-fake-ip hostname resolution while literal private IPs / loopback / metadata stay blocked; opt out with `PI_SEARCH_ALLOW_TUN_FAKEIP=0`) + single-policy merge (deduplicated the proactive-search ruleset into one `<search_balance>` with an explicit tool-routing section; the standalone web-search-guidance extension was retired).**
-> Note for Clash/sing-box TUN users: without this fix, `fetch_page` fails on every real URL with "resolves to private IP 198.18.0.x".
+23 measured iterations (see the repo commit history): from single-engine Bing scraping → 4-engine fusion with complexity routing → focus-filtered reading (95% token savings) → deep research with corroboration → parallel subagents → proactive-search policy (v3: anti-over-search stop rules; v4: autonomy/fallback rules) → audit fixes → **round 23: TUN fake-ip carve-out (Clash TUN answers every DNS query with 198.18/15; the SSRF guard can allow an all-fake-ip hostname resolution while literal private IPs / loopback / metadata stay blocked; security-first default is off, opt in with `PI_SEARCH_ALLOW_TUN_FAKEIP=1`) + single-policy merge (deduplicated the proactive-search ruleset into one `<search_balance>` with an explicit tool-routing section; the standalone web-search-guidance extension was retired).**
+> Clash/sing-box fake-IP TUN users must explicitly set `PI_SEARCH_ALLOW_TUN_FAKEIP=1`; the strict default intentionally blocks 198.18/15 DNS answers.
 
 ---
 

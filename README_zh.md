@@ -23,9 +23,9 @@ English → [README.md](./README.md)
 - **融合多引擎搜索** — api 层：Tavily + Brave API + Exa 并行；free 层：keyless Exa MCP（单引擎）。用 `/web_change` 切换
 - **跨引擎排序** — 按 URL 去重、按引擎共识与域名质量交叉排序，带每域名软多样性衰减；被 2+ 个独立引擎命中的结果是高置信，单引擎噪音被降权
 - **复杂度路由** — 搜索预算绑定查询复杂度：`simple` = 1 变体 × 2 引擎（1 credit）、`medium` = 2 × 3、`complex` = 3 × 4 + advanced 抽取（2 credits）
-- **聚焦过滤抓页** — `fetch_page` 的 `focus` 参数只保留与查询相关的段落（实测省 ~95% token）
-- **深度研究循环** — 检索 → 抓页 → 抽取 → 覆盖度检查 → 生成追问 → 收敛，带逐来源佐证（关键声明需 ≥2 个独立域名）
-- **并行多代理研究** — 把问题拆成 2-4 个子任务，每个作为独立 pi 子进程运行，各自有搜索预算
+- **聚焦过滤抓页** — `fetch_page` 按唯一概念覆盖排序，保留发布/状态表格与有限上下文，只返回查询相关段落（实测省 ~95% token）
+- **证据驱动深度研究** — 检索 → 抓页 → goal 感知证据抽取 → 多域覆盖 → 追问；覆盖只检查摘录，声明对齐使用版本/日期/数值锚点，语义 goal 判断仍由模型完成
+- **并行多代理研究** — 2-4 个独立 pi 子进程；避免扩展重复加载，并对瞬时 WebSocket/provider 故障串行重试
 - **X/Twitter 实时搜索** — `x_search`：托管 x_search 工具（grok 登录 / `XAI_API_KEY`）与融合多引擎（限 x.com）并行、结果去重合并；用户结构化资料走 X 匿名 guest GraphQL；oEmbed 全文增强；无任何凭据也能用（~2s 多引擎降级）
 - **缓存** — 搜索结果（6h）与页面（24h）落盘；热缓存命中 ~1ms，跨进程
 - **审计与可观测** — 每次搜索/抓页/研究事件都记 JSONL 日志（5MB 轮转），含层级、credits 估算、引擎错误、耗时；TUI 提供 `/search-audit` 与 `/search-cache` 命令
@@ -35,7 +35,7 @@ English → [README.md](./README.md)
 
 ## 安装——让 pi 来搞定
 
-**前置**：已安装 pi（建议 v0.84 或更新；扩展用到 `pi.registerTool` 与 `before_agent_start` 系统提示词注入）。无需构建、无需打包。
+**前置**：pi v0.84+ 与 Node.js 22.6+（发布包测试 runner 使用原生 TypeScript strip）。扩展本身无需构建或 bundler。
 
 ### 方式 A：npm 一键安装（推荐）
 
@@ -49,7 +49,7 @@ pi -e npm:pi-search-boost -p "fused_search 'tokio latest version'"
 pi install npm:pi-search-boost
 ```
 
-然后重启 pi 或执行 `/reload`。之后升级：`pi update npm:pi-search-boost`（锁定版本不会被自动更新——要升级到指定版本用 `pi install npm:pi-search-boost@0.1.0`）。
+然后重启 pi 或执行 `/reload`。之后升级：`pi update npm:pi-search-boost`（锁定版本不会被自动更新——升级当前版本可用 `pi install npm:pi-search-boost@latest`）。
 
 ### 方式 B：git 一键安装
 
@@ -107,7 +107,7 @@ Key 是**环境变量**（扩展不读 `.env` 文件）：
 | `PI_SEARCH_BRAVE_KEY` | Brave | 关键词 + 操作符 |
 | `PI_SEARCH_CACHE_TTL` | — | 搜索缓存秒数（默认 `21600`，6h） |
 | `PI_SEARCH_PAGE_TTL` | — | 页面缓存秒数（默认 `86400`，24h） |
-| `PI_SEARCH_ALLOW_TUN_FAKEIP` | — | 设为 `0` 关闭 Clash/sing-box TUN fake-ip carve-out（默认开启） |
+| `PI_SEARCH_ALLOW_TUN_FAKEIP` | — | 设为 `1` 显式开启 Clash/sing-box TUN fake-ip carve-out（默认关闭） |
 
 注册入口：[Tavily](https://tavily.com)（1000 免费 credits/月）· [Exa](https://exa.ai) · [Brave](https://brave.com/search/api/)
 
@@ -149,9 +149,9 @@ pi remove git:github.com/Mr-remon219/pi-search-boost
 | 工具 | 功能 |
 | --- | --- |
 | `fused_search` | 多引擎搜索：关键词变体 × 引擎并行 → URL 去重 → 跨引擎打分 → 带引擎来源、发布日期与全文（Tavily advanced / Exa）的排序结果，可直接消费 |
-| `fetch_page` | Reader 模式抓页：Jina Reader（免 key）→ 本地启发式抽取兜底 → 薄页面走无头浏览器。`focus` 参数只保留相关段落（省 80-95% token） |
-| `deep_research` | 多轮循环：覆盖度检查、逐来源佐证、一手来源优先、时效性。`mode=step` 返回缺口与建议查询，供 agent 亲自驱动迭代 |
-| `research_parallel` | 2-4 个独立子代理（pi 子进程）各自带搜索预算，并行跑，最后交叉验证汇总 |
+| `fetch_page` | 带重定向 SSRF 复检的 Reader 抓页；Jina/本地/browser 抽取，并用概念排序的 focus 过滤保留相关表格与上下文 |
+| `deep_research` | goal 感知多轮证据循环：查询词只在选中摘录中检查，goal 词需 ≥2 独立域，时效目标需近期且声明对齐的证据；不会自动宣称语义 goal 已满足 |
+| `research_parallel` | 2-4 个独立 pi 子进程，审计真实引用来源；有界 stderr 诊断并串行重试瞬时 WebSocket/provider 故障 |
 | `x_search` | X/Twitter 实时搜索（帖子/用户/线程）。keyword/semantic 双通道并行：托管 x_search 工具（grok 登录 / `XAI_API_KEY`）∥ 融合多引擎（限 x.com），结果去重合并；无凭据也可用（多引擎 + oEmbed 全文增强；用户结构化资料走 guest GraphQL） |
 
 ### fused_search 参数
@@ -259,8 +259,8 @@ lib/util.ts     带超时/信号的 fetch、HTML 解码、URL 归一化、CJK �
 
 ## 开发历史
 
-23 轮实测迭代（详见仓库提交历史）：单引擎 Bing 抓取 → 4 引擎融合 + 复杂度路由 → 聚焦过滤抓页（95% token 节省）→ 带佐证的深度研究 → 并行子代理 → 前摄搜索策略（v3：反过度搜索停止规则；v4：自治/兜底规则）→ 审计修复 → **第 23 轮：TUN fake-ip carve-out（Clash TUN 对每个 DNS 查询都回 198.18/15；SSRF 防护现在允许全 fake-ip 主机名解析，但字面私网 IP / 回环 / metadata 仍被拦截；可用 `PI_SEARCH_ALLOW_TUN_FAKEIP=0` 关闭）+ 单策略合并（前摄搜索规则集去重合并为一个带显式工具路由章节的 `<search_balance>`；独立的 web-search-guidance 扩展退役）。**
-> Clash/sing-box TUN 用户注意：没有这个修复，`fetch_page` 会对每个真实 URL 报 "resolves to private IP 198.18.0.x"。
+23 轮实测迭代（详见仓库提交历史）：单引擎 Bing 抓取 → 4 引擎融合 + 复杂度路由 → 聚焦过滤抓页（95% token 节省）→ 带佐证的深度研究 → 并行子代理 → 前摄搜索策略（v3：反过度搜索停止规则；v4：自治/兜底规则）→ 审计修复 → **第 23 轮：TUN fake-ip carve-out（Clash TUN 对每个 DNS 查询都回 198.18/15；SSRF 防护可允许全 fake-ip 主机名解析，但字面私网 IP / 回环 / metadata 仍被拦截；安全优先默认关闭，可用 `PI_SEARCH_ALLOW_TUN_FAKEIP=1` 显式开启）+ 单策略合并（前摄搜索规则集去重合并为一个带显式工具路由章节的 `<search_balance>`；独立的 web-search-guidance 扩展退役）。**
+> Clash/sing-box fake-IP TUN 用户需显式设置 `PI_SEARCH_ALLOW_TUN_FAKEIP=1`；严格默认会有意拦截 198.18/15 DNS 结果。
 
 ## License
 

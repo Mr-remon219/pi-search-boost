@@ -1,6 +1,6 @@
 {
   "name": "pi-search-boost",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Multi-engine research-grade web search for pi: fused retrieval, deep research loops, parallel subagents, focus-filtered page reading, real-time X/Twitter search, caching, and auditability.",
   "type": "module",
   "keywords": [
@@ -31,6 +31,7 @@
   "files": [
     "index.ts",
     "lib",
+    ".env.example",
     "README.md",
     "README_zh.md",
     "RELEASE_NOTES_v0.0.1.md",
@@ -39,6 +40,8 @@
     "RELEASE_NOTES_v0.0.4.md",
     "RELEASE_NOTES_v0.1.0.md",
     "RELEASE_NOTES_v0.1.2.md",
+    "RELEASE_NOTES_v0.1.3.md",
+    "test",
     "AGENTS.md",
     "LICENSE"
   ],
@@ -52,11 +55,11 @@
   },
   "author": "Mr-remon219",
   "scripts": {
-    "test": "node --experimental-strip-types --test test/unit.test.ts",
-    "test:blackbox": "node --experimental-strip-types --test test/blackbox.test.ts",
-    "test:all": "node --experimental-strip-types --test test/unit.test.ts test/blackbox.test.ts"
+    "test": "node test/run.mjs unit",
+    "test:blackbox": "node test/run.mjs blackbox",
+    "test:all": "node test/run.mjs all"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.6"
   }
 }
